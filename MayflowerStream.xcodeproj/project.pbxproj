@@ -1,0 +1,474 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		246CFCDC930E09EAE511889C /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = E818E9637E942AEC900811A0 /* HaishinKit */; };
+		498A383B9D2BA8EA7DE3C621 /* RTMPHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 187E006489067D756E5026D5 /* RTMPHaishinKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		957BE237625989F2FA46651B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E1D9A56801926DFE40C269AA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 900EBFCFC96E47365D0B057E;
+			remoteInfo = MayflowerStream;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A0783187E94678C7C13BB6E2 /* MayflowerStream.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MayflowerStream.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C496C0D88EF8CBEE2337F9D9 /* MayflowerStreamTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MayflowerStreamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		64DFCADF9C5582EDC397186B /* MayflowerStreamTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = MayflowerStreamTests;
+			sourceTree = "<group>";
+		};
+		817E3DA280539D15FBA73BE5 /* MayflowerStream */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = MayflowerStream;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D7E91139B90BFE24926242ED /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				246CFCDC930E09EAE511889C /* HaishinKit in Frameworks */,
+				498A383B9D2BA8EA7DE3C621 /* RTMPHaishinKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		3C4EBFDDB56CC1927429667E = {
+			isa = PBXGroup;
+			children = (
+				817E3DA280539D15FBA73BE5 /* MayflowerStream */,
+				64DFCADF9C5582EDC397186B /* MayflowerStreamTests */,
+				4AEA6A83C40DABD8EC6496B8 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4AEA6A83C40DABD8EC6496B8 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A0783187E94678C7C13BB6E2 /* MayflowerStream.app */,
+				C496C0D88EF8CBEE2337F9D9 /* MayflowerStreamTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		67E5717906C2E9B3A8180611 /* MayflowerStreamTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 68BBE09EBFC5B39206039420 /* Build configuration list for PBXNativeTarget "MayflowerStreamTests" */;
+			buildPhases = (
+				36D302C557557DF24F3B2FFE /* Sources */,
+				AF970D4C78C09A45E02D566C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				88EF2DD8D595691270A83A09 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				64DFCADF9C5582EDC397186B /* MayflowerStreamTests */,
+			);
+			name = MayflowerStreamTests;
+			packageProductDependencies = (
+			);
+			productName = MayflowerStreamTests;
+			productReference = C496C0D88EF8CBEE2337F9D9 /* MayflowerStreamTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		900EBFCFC96E47365D0B057E /* MayflowerStream */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2490C06BCE52C33B41771348 /* Build configuration list for PBXNativeTarget "MayflowerStream" */;
+			buildPhases = (
+				79392B533654F4DC801DEA50 /* Sources */,
+				18EFBF88CCA9F9AE805A7687 /* Resources */,
+				D7E91139B90BFE24926242ED /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				817E3DA280539D15FBA73BE5 /* MayflowerStream */,
+			);
+			name = MayflowerStream;
+			packageProductDependencies = (
+				E818E9637E942AEC900811A0 /* HaishinKit */,
+				187E006489067D756E5026D5 /* RTMPHaishinKit */,
+			);
+			productName = MayflowerStream;
+			productReference = A0783187E94678C7C13BB6E2 /* MayflowerStream.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		E1D9A56801926DFE40C269AA /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					900EBFCFC96E47365D0B057E = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 1EC16BCAA695AEFDD0E54489 /* Build configuration list for PBXProject "MayflowerStream" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 3C4EBFDDB56CC1927429667E;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F5526642CA1F42B94608D790 /* XCRemoteSwiftPackageReference "HaishinKit.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4AEA6A83C40DABD8EC6496B8 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				900EBFCFC96E47365D0B057E /* MayflowerStream */,
+				67E5717906C2E9B3A8180611 /* MayflowerStreamTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		18EFBF88CCA9F9AE805A7687 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF970D4C78C09A45E02D566C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		36D302C557557DF24F3B2FFE /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		79392B533654F4DC801DEA50 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		88EF2DD8D595691270A83A09 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 900EBFCFC96E47365D0B057E /* MayflowerStream */;
+			targetProxy = 957BE237625989F2FA46651B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		03DEE08EF6FBC2335FAC289A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "MayflowerStream needs the camera to show your preview and to broadcast video.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MayflowerStream needs the microphone to broadcast your audio.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.slobodianiuk.MayflowerStream;
+				PRODUCT_NAME = MayflowerStream;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		26116DCB81066BCB65ED492C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.slobodianiuk.MayflowerStreamTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MayflowerStream.app/MayflowerStream";
+			};
+			name = Release;
+		};
+		2D9E08DA79E191D0E399D1B3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "MayflowerStream needs the camera to show your preview and to broadcast video.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MayflowerStream needs the microphone to broadcast your audio.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.slobodianiuk.MayflowerStream;
+				PRODUCT_NAME = MayflowerStream;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		4E67A0B7D6B9AD50C1B6DA36 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A28C42568D9A8D22E9684B6E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		CD8B26A5B1684F26EE4EB155 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.slobodianiuk.MayflowerStreamTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MayflowerStream.app/MayflowerStream";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1EC16BCAA695AEFDD0E54489 /* Build configuration list for PBXProject "MayflowerStream" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A28C42568D9A8D22E9684B6E /* Debug */,
+				4E67A0B7D6B9AD50C1B6DA36 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		2490C06BCE52C33B41771348 /* Build configuration list for PBXNativeTarget "MayflowerStream" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				03DEE08EF6FBC2335FAC289A /* Debug */,
+				2D9E08DA79E191D0E399D1B3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		68BBE09EBFC5B39206039420 /* Build configuration list for PBXNativeTarget "MayflowerStreamTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CD8B26A5B1684F26EE4EB155 /* Debug */,
+				26116DCB81066BCB65ED492C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F5526642CA1F42B94608D790 /* XCRemoteSwiftPackageReference "HaishinKit.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/HaishinKit/HaishinKit.swift.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 2.2.5;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		187E006489067D756E5026D5 /* RTMPHaishinKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F5526642CA1F42B94608D790 /* XCRemoteSwiftPackageReference "HaishinKit.swift" */;
+			productName = RTMPHaishinKit;
+		};
+		E818E9637E942AEC900811A0 /* HaishinKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F5526642CA1F42B94608D790 /* XCRemoteSwiftPackageReference "HaishinKit.swift" */;
+			productName = HaishinKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = E1D9A56801926DFE40C269AA /* Project object */;
+}
