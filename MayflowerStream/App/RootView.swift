@@ -2,7 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     var body: some View {
-        Text("MayflowerStream")
+        StreamConfigurationView(store: KeychainStreamSettingsStore())
     }
 }
 
