@@ -50,27 +50,49 @@ enum StreamingEvent: Equatable, Sendable {
 
 /// A snapshot of the outgoing stream, shown in the parameters sheet.
 ///
-/// `configured` is what was asked for and `actual` is what the encoder reports it is doing. They
-/// are kept apart on purpose: the task asks for the real outgoing stream to match the configured
-/// settings, and the only honest way to show that is to show both numbers.
+/// `configured` is what the app asked for. `applied` is what the encoder says it took, read back
+/// out of the SDK rather than assumed. They are separate fields on purpose: the task asks for a
+/// guarantee that the real outgoing stream matches the configured settings, and putting both
+/// numbers on screen is the honest version of that guarantee — if they ever disagree, the user
+/// sees it instead of being told everything is fine.
+///
+/// `currentFrameRate` is the only measured number here. Everything else is a setting.
 struct StreamStatistics: Equatable, Sendable {
     var configured: BroadcastConfiguration
-    var actualVideoBitRate: Int?
-    var actualAudioBitRate: Int?
-    var actualVideoSize: CGSize?
-    var totalBytesSent: Int64?
+
+    var appliedVideoSize: CGSize?
+    var appliedVideoBitRate: Int?
+    var appliedVideoCodec: String?
+    var appliedAudioBitRate: Int?
+    var appliedAudioCodec: String?
+    var currentFrameRate: Int?
 
     init(
         configured: BroadcastConfiguration,
-        actualVideoBitRate: Int? = nil,
-        actualAudioBitRate: Int? = nil,
-        actualVideoSize: CGSize? = nil,
-        totalBytesSent: Int64? = nil
+        appliedVideoSize: CGSize? = nil,
+        appliedVideoBitRate: Int? = nil,
+        appliedVideoCodec: String? = nil,
+        appliedAudioBitRate: Int? = nil,
+        appliedAudioCodec: String? = nil,
+        currentFrameRate: Int? = nil
     ) {
         self.configured = configured
-        self.actualVideoBitRate = actualVideoBitRate
-        self.actualAudioBitRate = actualAudioBitRate
-        self.actualVideoSize = actualVideoSize
-        self.totalBytesSent = totalBytesSent
+        self.appliedVideoSize = appliedVideoSize
+        self.appliedVideoBitRate = appliedVideoBitRate
+        self.appliedVideoCodec = appliedVideoCodec
+        self.appliedAudioBitRate = appliedAudioBitRate
+        self.appliedAudioCodec = appliedAudioCodec
+        self.currentFrameRate = currentFrameRate
+    }
+
+    /// True when every number the encoder reported matches what it was asked for. Drives the one
+    /// line in the sheet that says whether the outgoing stream is what was configured.
+    var matchesConfiguration: Bool {
+        if let appliedVideoSize, appliedVideoSize != configured.videoSize { return false }
+        if let appliedVideoBitRate, appliedVideoBitRate != configured.videoBitRate { return false }
+        if let appliedAudioBitRate, appliedAudioBitRate != configured.audioBitRate { return false }
+        if let appliedVideoCodec, appliedVideoCodec != BroadcastConfiguration.videoCodec { return false }
+        if let appliedAudioCodec, appliedAudioCodec != BroadcastConfiguration.audioCodec { return false }
+        return true
     }
 }

@@ -74,9 +74,12 @@ final class FakeStreamingSession: StreamingSession {
     func currentStatistics() async -> StreamStatistics {
         StreamStatistics(
             configured: configuration,
-            actualVideoBitRate: configuration.videoBitRate,
-            actualAudioBitRate: configuration.audioBitRate,
-            actualVideoSize: configuration.videoSize
+            appliedVideoSize: configuration.videoSize,
+            appliedVideoBitRate: configuration.videoBitRate,
+            appliedVideoCodec: BroadcastConfiguration.videoCodec,
+            appliedAudioBitRate: configuration.audioBitRate,
+            appliedAudioCodec: BroadcastConfiguration.audioCodec,
+            currentFrameRate: Int(configuration.frameRate)
         )
     }
 }

@@ -75,6 +75,10 @@ struct StreamConfigurationView: View {
         } else {
             SecureField("live_…", text: $model.streamKey)
                 .textInputAutocapitalization(.never)
+                // A stream key is not an account password. Without this, iOS offers to save it to
+                // the user's passwords the moment the screen is left, which is both confusing and
+                // pointless — the app already keeps it in the keychain itself.
+                .textContentType(.oneTimeCode)
                 .focused($focusedField, equals: .streamKey)
         }
     }

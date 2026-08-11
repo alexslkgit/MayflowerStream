@@ -1,16 +1,230 @@
+import HaishinKit
 import SwiftUI
 
-/// Screen 2 — Main Stream. Placeholder: the capture and broadcast pieces land in the next commits.
+/// Screen 2 — Main Stream.
+///
+/// The screen opens with nothing running. The camera starts on an explicit tap, which is also when
+/// permission is asked for; the broadcast starts on a second tap. Page 3 of the task asks for a
+/// preview as soon as this screen is reached, and page 4 forbids initialising anything on screen
+/// load — two taps is what satisfies both, and it is also what lets the user frame the shot and
+/// mute themselves before going live.
 struct StreamView: View {
-    let endpoint: StreamEndpoint
+    @State private var screen: StreamScreen
+    @State private var isShowingParameters = false
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
+
+    init(endpoint: StreamEndpoint) {
+        _screen = State(initialValue: StreamScreen(endpoint: endpoint))
+    }
+
+    private var controller: BroadcastController { screen.controller }
 
     var body: some View {
-        ContentUnavailableView(
-            "Not built yet",
-            systemImage: "video.slash",
-            description: Text(endpoint.connectURL)
-        )
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if controller.isCapturing {
+                MTHKViewRepresentable(previewSource: screen.session, videoGravity: .resizeAspectFill)
+                    .ignoresSafeArea()
+            } else {
+                idlePlaceholder
+            }
+
+            VStack {
+                statusPanel
+                Spacer()
+                if let failure = controller.state.failure {
+                    failureCard(failure)
+                }
+                if controller.isCapturing {
+                    controls
+                }
+            }
+            .padding()
+        }
         .navigationTitle("Broadcast")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .sheet(isPresented: $isShowingParameters) {
+            StreamParametersSheet(
+                state: controller.state,
+                duration: controller.formattedDuration,
+                statistics: controller.statistics
+            )
+        }
+        .task(id: isShowingParameters) {
+            // Keep the numbers in the sheet moving while it is open, and stop asking when it closes.
+            while isShowingParameters, !Task.isCancelled {
+                await controller.refreshStatistics()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // The documented lifecycle strategy: the app does not broadcast in the background.
+            // Only `.background` counts — `.inactive` also fires while the system permission alert
+            // is on screen, and tearing the camera down there would fight the thing we just asked
+            // the user to allow.
+            if phase == .background {
+                Task { await controller.shutDown() }
+            }
+        }
+        .onDisappear {
+            Task { await controller.shutDown() }
+        }
+    }
+
+    // MARK: - Pieces
+
+    private var statusPanel: some View {
+        StreamStatusPanel(
+            state: controller.state,
+            duration: controller.formattedDuration,
+            // The task asks for the sheet on an Online panel specifically, and there is nothing
+            // truthful to put in it before then.
+            onTap: controller.state.isLive ? { isShowingParameters = true } : nil
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var idlePlaceholder: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "video.circle")
+                .font(.system(size: 64))
+                .foregroundStyle(.white.opacity(0.6))
+            Text("The camera is off.")
+                .foregroundStyle(.white.opacity(0.8))
+            Button("Turn on the camera") {
+                Task { await controller.startCapture() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        }
+    }
+
+    private var controls: some View {
+        HStack {
+            circleButton(
+                systemImage: controller.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
+                label: controller.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
+                tint: controller.isMicrophoneMuted ? .red : .white
+            ) {
+                Task { await controller.toggleMicrophone() }
+            }
+
+            Spacer()
+            broadcastButton
+            Spacer()
+
+            circleButton(
+                systemImage: "arrow.triangle.2.circlepath.camera.fill",
+                label: "Switch camera",
+                tint: .white
+            ) {
+                Task { await controller.switchCamera() }
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private var broadcastButton: some View {
+        Button {
+            Task {
+                if controller.state.isLive || controller.state.isBusy {
+                    await controller.stopBroadcast()
+                } else {
+                    await controller.startBroadcast()
+                }
+            }
+        } label: {
+            ZStack {
+                Circle()
+                    .strokeBorder(.white, lineWidth: 4)
+                    .frame(width: 74, height: 74)
+                RoundedRectangle(cornerRadius: isStopShape ? 6 : 30)
+                    .fill(.red)
+                    .frame(width: isStopShape ? 30 : 60, height: isStopShape ? 30 : 60)
+                if controller.state.isBusy {
+                    ProgressView().tint(.white)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isStopShape ? "Stop broadcast" : "Start broadcast")
+        .animation(.easeInOut(duration: 0.2), value: isStopShape)
+    }
+
+    private var isStopShape: Bool {
+        controller.state.isLive || controller.state.isBusy
+    }
+
+    private func circleButton(
+        systemImage: String,
+        label: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private func failureCard(_ failure: BroadcastFailure) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(failure.message, systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline.weight(.semibold))
+            if let recovery = failure.recovery {
+                Text(recovery)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                if isPermissionFailure(failure) {
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                if failure.isUserRetryable {
+                    Button("Try again") {
+                        Task { await controller.retry() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.bottom, 8)
+    }
+
+    private func isPermissionFailure(_ failure: BroadcastFailure) -> Bool {
+        failure == .cameraAccessDenied || failure == .microphoneAccessDenied
+    }
+}
+
+/// Owns the session and the controller for one visit to this screen.
+///
+/// It exists because SwiftUI recreates view structs freely and both of these must be created once.
+/// Constructing it is cheap on purpose — `HaishinKitStreamingSession` builds nothing until capture
+/// is started.
+@MainActor
+final class StreamScreen {
+    let session: HaishinKitStreamingSession
+    let controller: BroadcastController
+
+    init(endpoint: StreamEndpoint) {
+        let session = HaishinKitStreamingSession()
+        self.session = session
+        self.controller = BroadcastController(endpoint: endpoint, session: session)
     }
 }
