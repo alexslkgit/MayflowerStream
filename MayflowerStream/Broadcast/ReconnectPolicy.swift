@@ -10,7 +10,7 @@ import Foundation
 /// How hard the app tries to re-establish a broadcast that dropped on its own.
 ///
 /// The delay is a closure rather than a formula baked into the controller so tests can run the
-/// whole reconnection sequence with no waiting at all. That is the only reason it is a closure.
+/// whole reconnection sequence with no waiting at all.
 struct ReconnectPolicy: Sendable {
     let maximumAttempts: Int
     let delay: @Sendable (_ attempt: Int) -> Duration

@@ -10,8 +10,8 @@ import SwiftUI
 /// The information panel: what the broadcast is doing, and for how long.
 ///
 /// It is the only thing on this screen that answers "am I live?", so it never borrows confidence
-/// from the preview underneath it. The dot is grey when nothing is going out, amber while the app
-/// is working on it, red when live, and red-on-error only through the word Error.
+/// from the preview underneath it. The dot's red is kept for live and nothing else, so on-air is
+/// never ambiguous.
 struct StreamStatusPanel: View {
     let state: BroadcastState
     let duration: String
@@ -23,6 +23,7 @@ struct StreamStatusPanel: View {
             Circle()
                 .fill(dotColor)
                 .frame(width: 9, height: 9)
+                .accessibilityHidden(true)
 
             Text(title)
                 .font(.subheadline.weight(.semibold))
@@ -37,6 +38,7 @@ struct StreamStatusPanel: View {
                 Image(systemName: "chevron.up")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 14)
@@ -71,7 +73,7 @@ struct StreamStatusPanel: View {
         case .offline: .secondary
         case .connecting, .reconnecting: .orange
         case .online: .red
-        case .failed: .red
+        case .failed: .orange
         }
     }
 }

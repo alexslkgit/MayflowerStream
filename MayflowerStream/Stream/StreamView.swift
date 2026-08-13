@@ -32,8 +32,12 @@ struct StreamView: View {
             Color.black.ignoresSafeArea()
 
             if controller.isCapturing {
+                // Everything except the top edge. Anything burned into the picture — the clock
+                // overlay sits 24px from the frame's top — would otherwise land underneath the
+                // system status bar and read as a rendering fault. The stream itself is unaffected;
+                // this only decides where the preview starts on screen.
                 MTHKViewRepresentable(previewSource: screen.session, videoGravity: .resizeAspectFill)
-                    .ignoresSafeArea()
+                    .ignoresSafeArea(edges: [.horizontal, .bottom])
             } else {
                 idlePlaceholder
             }
@@ -64,24 +68,32 @@ struct StreamView: View {
             )
         }
         .task(id: isShowingParameters) {
-            // Keep the numbers in the sheet moving while it is open, and stop asking when it closes.
             while isShowingParameters, !Task.isCancelled {
                 await controller.refreshStatistics()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        .onChange(of: controller.isCapturing) { _, isCapturing in
+            UIApplication.shared.isIdleTimerDisabled = isCapturing
+        }
         .onChange(of: scenePhase) { _, phase in
-            // The documented lifecycle strategy: the app does not broadcast in the background.
-            // Only `.background` counts — `.inactive` also fires while the system permission alert
-            // is on screen, and tearing the camera down there would fight the thing we just asked
-            // the user to allow.
-            if phase == .background {
+            if Self.shouldShutDown(on: phase) {
+                UIApplication.shared.isIdleTimerDisabled = false
                 Task { await controller.shutDown() }
             }
         }
         .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
             Task { await controller.shutDown() }
         }
+    }
+
+    /// The documented lifecycle strategy: the app does not broadcast in the background. Only
+    /// `.background` counts — `.inactive` also fires while the system permission alert is on
+    /// screen, and tearing the camera down there would fight the thing we just asked the user to
+    /// allow.
+    nonisolated static func shouldShutDown(on phase: ScenePhase) -> Bool {
+        phase == .background
     }
 
     // MARK: - Pieces
@@ -112,45 +124,51 @@ struct StreamView: View {
         }
     }
 
+    /// The record button sits in its own layer so it is centred on the screen, not centred between
+    /// the side controls. Two buttons on the left and one on the right are not the same width, and
+    /// balancing them with a pair of `Spacer()`s pushed the button 31pt to the right of centre.
     private var controls: some View {
-        HStack {
-            HStack(spacing: 10) {
-                circleButton(
-                    systemImage: controller.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
-                    label: controller.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
-                    tint: controller.isMicrophoneMuted ? .red : .white
-                ) {
-                    Task { await controller.toggleMicrophone() }
+        ZStack {
+            HStack {
+                HStack(spacing: 10) {
+                    circleButton(
+                        systemImage: controller.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
+                        label: controller.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
+                        tint: controller.isMicrophoneMuted ? .red : .white
+                    ) {
+                        Task { await controller.toggleMicrophone() }
+                    }
+
+                    // What is drawn here is drawn into the outgoing frames as well.
+                    circleButton(
+                        systemImage: "clock.fill",
+                        label: controller.isClockOverlayVisible ? "Hide the clock overlay" : "Show the clock overlay",
+                        tint: controller.isClockOverlayVisible ? .yellow : .white
+                    ) {
+                        Task { await controller.toggleClockOverlay() }
+                    }
                 }
 
-                // The overlay seam, with something on the end of it. What is drawn here is drawn
-                // into the outgoing frames as well, which is the whole point of it being here.
+                Spacer()
+
                 circleButton(
-                    systemImage: "clock.fill",
-                    label: controller.isClockOverlayVisible ? "Hide the clock overlay" : "Show the clock overlay",
-                    tint: controller.isClockOverlayVisible ? .yellow : .white
+                    systemImage: "arrow.triangle.2.circlepath.camera.fill",
+                    label: "Switch camera",
+                    tint: .white
                 ) {
-                    Task { await controller.toggleClockOverlay() }
+                    Task { await controller.switchCamera() }
                 }
             }
 
-            Spacer()
+            // Last, so it stays on top of the row and keeps its full tap target.
             broadcastButton
-            Spacer()
-
-            circleButton(
-                systemImage: "arrow.triangle.2.circlepath.camera.fill",
-                label: "Switch camera",
-                tint: .white
-            ) {
-                Task { await controller.switchCamera() }
-            }
         }
         .padding(.horizontal, 8)
     }
 
     private var broadcastButton: some View {
         Button {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             Task {
                 if controller.state.isLive || controller.state.isBusy {
                     await controller.stopBroadcast()

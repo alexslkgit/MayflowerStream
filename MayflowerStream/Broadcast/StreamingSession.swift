@@ -9,11 +9,11 @@ import Foundation
 
 /// Everything the app needs from a streaming library, and nothing else.
 ///
-/// This is the one seam in the app, and it earns its place three times over. It keeps HaishinKit's
-/// actor-isolated API out of the view layer; it lets the state machine and every error path be
-/// tested without a camera, a microphone or a server; and it is where a frame-processing step —
-/// a clock burned into the outgoing picture, say — would be added, because that is the only place
-/// frames pass through on their way from the capture session to the encoder.
+/// The one seam in the app. It keeps HaishinKit's actor-isolated API out of the view layer; it
+/// lets the state machine and every error path be tested without a camera, a microphone or a
+/// server; and it is where a frame-processing step — a clock burned into the outgoing picture,
+/// say — would be added, because that is the only place frames pass through on their way from the
+/// capture session to the encoder.
 ///
 /// Capture and publishing are deliberately separate. The user gets a preview before going live,
 /// and stopping a broadcast leaves the camera running so it can be started again immediately.
@@ -25,10 +25,9 @@ protocol StreamingSession: Sendable {
     /// one, and the controller owns the single task that drains it.
     var events: AsyncStream<StreamingEvent> { get }
 
-    /// Opens the camera and microphone. Nothing before this call touches AVFoundation.
+    /// Nothing before this call touches AVFoundation.
     func startCapture(_ configuration: BroadcastConfiguration) async throws(BroadcastFailure)
 
-    /// Closes the camera and microphone and releases everything held by the session.
     /// Safe to call when capture was never started.
     func stopCapture() async
 
@@ -38,22 +37,20 @@ protocol StreamingSession: Sendable {
     /// assume its own request took effect.
     func setMicrophoneMuted(_ isMuted: Bool) async -> Bool
 
-    /// Connects and begins publishing. Throws if the server rejects the attempt outright; a
-    /// connection that succeeds and then drops arrives as a `.disconnected` event instead.
+    /// Throws if the server rejects the attempt outright; a connection that succeeds and then
+    /// drops arrives as a `.disconnected` event instead.
     ///
     /// A call that throws must leave nothing open behind it: the next call has to be able to
     /// succeed, because that next call is how both the retry button and automatic reconnection
     /// work.
     func startPublishing(to endpoint: StreamEndpoint) async throws(BroadcastFailure)
 
-    /// Stops publishing and closes the connection, leaving capture running.
+    /// Leaves capture running.
     func stopPublishing() async
 
-    /// Draws an overlay into every frame from now on, or removes the one that is there.
     /// Safe to call before capture has started; it is applied when the pipeline is built.
     func setOverlay(_ overlay: (any StreamOverlay)?) async
 
-    /// What is actually going out right now, for the parameters sheet.
     func currentStatistics() async -> StreamStatistics
 }
 
@@ -68,10 +65,8 @@ enum StreamingEvent: Equatable, Sendable {
 /// A snapshot of the outgoing stream, shown in the parameters sheet.
 ///
 /// `configured` is what the app asked for. `applied` is what the encoder says it took, read back
-/// out of the SDK rather than assumed. They are separate fields on purpose: the task asks for a
-/// guarantee that the real outgoing stream matches the configured settings, and putting both
-/// numbers on screen is the honest version of that guarantee — if they ever disagree, the user
-/// sees it instead of being told everything is fine.
+/// out of the SDK rather than assumed. They are separate fields on purpose: if they ever disagree,
+/// the user sees it instead of being told everything is fine.
 ///
 /// `currentFrameRate` is the only measured number here. Everything else is a setting.
 struct StreamStatistics: Equatable, Sendable {
@@ -102,9 +97,6 @@ struct StreamStatistics: Equatable, Sendable {
         self.currentFrameRate = currentFrameRate
     }
 
-    /// True when every number the encoder reported matches what it was asked for. Drives the one
-    /// line in the sheet that says whether the outgoing stream is what was configured.
-    ///
     /// `currentFrameRate` is deliberately not part of this. It is measured rather than reported,
     /// and a camera delivering 29 of the 30 frames it was asked for is not a misconfigured
     /// encoder — counting it here would put a warning on every healthy broadcast.

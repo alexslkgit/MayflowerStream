@@ -18,11 +18,10 @@ import VideoToolbox
 /// that inside one file is most of the reason the protocol exists.
 ///
 /// **Nothing is built until `startCapture`.** Creating this object allocates an event stream and
-/// nothing else. That is not tidiness: `RTMPStream.init` starts a task that registers itself with
-/// its connection, so building the pipeline when the screen appears would leave live objects
-/// behind every time SwiftUI re-evaluated the view, and would open the media stack without the
-/// user having asked for it. The pipeline is created on the explicit tap and destroyed on
-/// `stopCapture`.
+/// nothing else. `RTMPStream.init` starts a task that registers itself with its connection, so
+/// building the pipeline when the screen appears would leave live objects behind every time
+/// SwiftUI re-evaluated the view, and would open the media stack without the user having asked for
+/// it. The pipeline is created on the explicit tap and destroyed on `stopCapture`.
 ///
 /// The pipeline is: `MediaMixer` owns the camera and the microphone, `RTMPStream` is registered as
 /// one of the mixer's outputs and encodes what the mixer produces, and `RTMPConnection` carries it
@@ -42,9 +41,10 @@ actor HaishinKitStreamingSession: StreamingSession {
     nonisolated let events: AsyncStream<StreamingEvent>
     private nonisolated let continuation: AsyncStream<StreamingEvent>.Continuation
 
-    /// The user is told a sentence; this is where the raw reason goes, so a failure on a reviewer's
-    /// phone can be read back out of the device log instead of guessed at.
+    /// The user is told a sentence; this is where the raw reason goes, so a failure on a phone
+    /// without that camera can be read back out of the device log instead of guessed at.
     private static let log = Logger(subsystem: "com.slobodianiuk.MayflowerStream", category: "broadcast")
+    private static let rtmpLog = Logger(subsystem: "com.slobodianiuk.MayflowerStream", category: "rtmp")
 
     /// The media stack. Nil until the user starts the camera, and nil again after they stop it.
     private struct Pipeline {
@@ -325,11 +325,16 @@ actor HaishinKitStreamingSession: StreamingSession {
             mixer.screen.size = size
             caption.horizontalAlignment = placement.horizontalAlignment
             caption.verticalAlignment = placement.verticalAlignment
+            // Only the top and bottom margins place a centred caption. The side ones still earn
+            // their keep: `TextScreenObject` measures its text against the frame less all four, so
+            // a long caption wraps rather than running into the edges.
             caption.layoutMargin = .init(top: 24, left: 24, bottom: 24, right: 24)
             caption.string = text
             try? mixer.screen.addChild(caption)
         }.value
 
+        // Something that never changes — a fixed caption, a watermark — is drawn once and given no
+        // timer.
         guard let interval = overlay.refreshInterval else { return }
         overlayTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -427,6 +432,7 @@ actor HaishinKitStreamingSession: StreamingSession {
     }
 
     private func handleConnectionStatus(_ status: RTMPStatus) {
+        Self.rtmpLog.debug("connection status: \(status.code, privacy: .public) — \(status.description, privacy: .public)")
         switch RTMPConnection.Code(rawValue: status.code) {
         case .connectSuccess:
             // The transport is up. Being live is a stream-level fact, so nothing is reported here.
@@ -443,6 +449,7 @@ actor HaishinKitStreamingSession: StreamingSession {
     }
 
     private func handleStreamStatus(_ status: RTMPStatus) {
+        Self.rtmpLog.debug("stream status: \(status.code, privacy: .public) — \(status.description, privacy: .public)")
         switch RTMPStream.Code(rawValue: status.code) {
         case .publishStart:
             // The confirmation the handshake was waiting for. From here a close is a lost
@@ -588,28 +595,27 @@ actor HaishinKitStreamingSession: StreamingSession {
     }
 }
 
-/// The app's own idea of a corner, translated into the library's two alignments.
 @ScreenActor
 private extension StreamOverlayPlacement {
+    /// `.center` is the one horizontal alignment `ScreenObject` lays out from the frame's width
+    /// alone — `.left` and `.right` add the margin to the edge they hang from. That is what keeps a
+    /// caption on screen at any resolution, and it is why both placements use it.
     var horizontalAlignment: ScreenObject.HorizontalAlignment {
         switch self {
-        case .topLeading, .bottomLeading: .left
-        case .topTrailing, .bottomTrailing: .right
+        case .topCenter, .bottomCenter: .center
         }
     }
 
     var verticalAlignment: ScreenObject.VerticalAlignment {
         switch self {
-        case .topLeading, .topTrailing: .top
-        case .bottomLeading, .bottomTrailing: .bottom
+        case .topCenter: .top
+        case .bottomCenter: .bottom
         }
     }
 }
 
 extension HaishinKitStreamingSession: MTHKViewRepresentable.PreviewSource {
-    /// Called by SwiftUI once, when the preview view is created. The view is attached to the
-    /// *mixer*, so it renders the camera regardless of whether anything is being published — and
-    /// if capture has not started yet, it is remembered until it has.
+    /// Called by SwiftUI once, when the preview view is created.
     nonisolated func connect(to view: MTHKView) {
         Task { await attach(previewView: view) }
     }

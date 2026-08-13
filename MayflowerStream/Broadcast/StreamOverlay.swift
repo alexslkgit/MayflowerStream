@@ -9,34 +9,41 @@ import Foundation
 
 /// Something drawn on top of the picture that goes out.
 ///
-/// This is the extensibility the task asks about, expressed as a type rather than as a promise in a
-/// comment. An overlay says *what* to show and *where*; the session owns the drawing, because
-/// compositing is the one part of it that belongs to the streaming library. The same composited
-/// frame feeds the encoder and the on-screen preview, so what the user sees is what the viewers
-/// see.
+/// An overlay says *what* to show and *where*; the session owns the drawing, because compositing
+/// is the one part of it that belongs to the streaming library. The same composited frame feeds
+/// the encoder and the on-screen preview, so what the user sees is what the viewers see.
 ///
-/// A richer overlay — an image, a logo, a live viewer count — is the same protocol with a different
-/// implementation; only `HaishinKitStreamingSession` needs to learn how to draw a new kind, and
-/// nothing above it changes.
+/// A richer *text* overlay — a longer caption, a live viewer count, a lower third — is the same
+/// protocol with a different implementation; only `HaishinKitStreamingSession` needs to learn how to
+/// draw a new kind, and nothing above it changes. An overlay whose content is an image is not a
+/// drop-in: `text(at:)` is the only content this protocol has and the session hard-wires a
+/// `TextScreenObject` to draw it, so an image overlay would need the protocol to grow an
+/// image-content requirement first. HaishinKit already has `ImageScreenObject` for the rendering
+/// side — it is the boundary here, not the drawing, that is missing.
 protocol StreamOverlay: Sendable {
-    /// Which corner of the picture it sits in.
     var placement: StreamOverlayPlacement { get }
-    /// How often it should be redrawn. `nil` for something that never changes.
+    /// `nil` for something that never changes.
     var refreshInterval: Duration? { get }
-    /// What to show at this moment.
     func text(at date: Date) -> String
 }
 
+/// Both cases are centred horizontally. An overlay pinned to a side edge sits a fixed margin from
+/// it in the composited frame, and that is not the margin the broadcaster sees: the preview
+/// aspect-fills the frame into the device's screen and crops the sides away, which is how the clock
+/// came to hang off the right-hand edge on a phone. Centred, it cannot drift off any screen at any
+/// resolution.
+///
+/// Adding a placement is an enum case plus two exhaustive switches in
+/// `HaishinKitStreamingSession`, so one cannot be offered here and then forgotten about at the
+/// drawing end.
 enum StreamOverlayPlacement: Equatable, Sendable {
-    case topLeading, topTrailing, bottomLeading, bottomTrailing
+    case topCenter
+    case bottomCenter
 }
 
-/// The worked example: the time of day, burned into the broadcast, refreshed every second.
-///
-/// It is off until the user turns it on. It exists to prove the seam carries a moving overlay all
-/// the way to the encoder — which is the hard half, and the half a comment cannot demonstrate.
+/// The worked example: the time of day, burned into the broadcast.
 struct ClockOverlay: StreamOverlay {
-    var placement: StreamOverlayPlacement = .topTrailing
+    var placement: StreamOverlayPlacement = .topCenter
     var refreshInterval: Duration? = .seconds(1)
 
     func text(at date: Date) -> String {

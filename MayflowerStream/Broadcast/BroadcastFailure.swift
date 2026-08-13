@@ -10,11 +10,10 @@ import Foundation
 /// Everything that can go wrong, expressed in the vocabulary the user cares about rather than the
 /// vocabulary the SDK uses.
 ///
-/// This is the whole point of the type: RTMP status codes, `AVCaptureSession` errors, keychain
-/// `OSStatus` values and network failures all arrive in different shapes, and every one of them
-/// has to end up as a sentence on screen. Translating at the edge — where the raw failure is
-/// still understood — means the UI never has to guess, and the state machine can be tested
-/// against these cases without a camera or a server.
+/// RTMP status codes, `AVCaptureSession` errors, keychain `OSStatus` values and network failures
+/// all arrive in different shapes, and every one of them has to end up as a sentence on screen.
+/// Translating at the edge — where the raw failure is still understood — means the UI never has to
+/// guess, and the state machine can be tested against these cases without a camera or a server.
 enum BroadcastFailure: Error, Equatable, Sendable {
 
     // Permissions and hardware
@@ -94,13 +93,12 @@ extension BroadcastFailure {
         }
     }
 
-    /// What the user can do about it, when there is something.
     var recovery: String? {
         switch self {
         case .cameraAccessDenied, .microphoneAccessDenied:
             "Open Settings to allow it, then come back and try again."
         case .cameraMissing:
-            "Switch to the other camera."
+            "Check that this device has a camera on that side, then try again."
         case .cameraUnavailable:
             "Close any other app that might be using the camera and try again."
         case .microphoneUnavailable:
@@ -156,7 +154,6 @@ extension BroadcastFailure {
         }
     }
 
-    /// Whether offering the user a "try again" button makes sense at all.
     var isUserRetryable: Bool {
         switch self {
         case .unsupportedConfiguration: false

@@ -25,8 +25,8 @@ struct BroadcastConfiguration: Equatable, Sendable {
     static let videoCodec = "H.264"
     static let audioCodec = "AAC"
 
-    /// Portrait 720p at 2.5 Mbps. Comfortably inside every limit checked below, and a resolution
-    /// every iPhone since the 6s can produce from either camera.
+    /// Comfortably inside every limit checked below, and a resolution every iPhone since the 6s
+    /// can produce from either camera.
     static let `default` = BroadcastConfiguration(
         videoSize: CGSize(width: 720, height: 1280),
         videoBitRate: 2_500_000,

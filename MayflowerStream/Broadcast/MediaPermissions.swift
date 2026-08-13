@@ -18,11 +18,10 @@ enum MediaPermissionOutcome: Equatable, Sendable {
 }
 
 /// Asking for camera and microphone access, behind a protocol so the denial paths can be tested.
-/// Denial is not an edge case here — it is one of the things this task is graded on.
 protocol MediaPermissions: Sendable {
-    /// Prompts the user if they have never been asked, and returns their answer.
-    /// If they have already refused, this returns `.denied` without showing anything, which is
-    /// why the UI has to offer a route to Settings rather than another prompt.
+    /// Prompts the user only if they have never been asked. If they have already refused, this
+    /// returns `.denied` without showing anything, which is why the UI has to offer a route to
+    /// Settings rather than another prompt.
     func requestAccess(to kind: MediaKind) async -> MediaPermissionOutcome
 }
 

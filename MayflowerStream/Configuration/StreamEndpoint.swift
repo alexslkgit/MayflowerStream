@@ -29,7 +29,7 @@ extension StreamEndpoint {
 }
 
 /// Why a destination could not be built. Every case carries a message a non-technical user can act
-/// on; `ValidationError` never reaches the screen in its raw form.
+/// on; `StreamEndpointError` never reaches the screen in its raw form.
 enum StreamEndpointError: Error, Equatable {
     case ingestURLMissing
     case streamKeyMissing
@@ -67,8 +67,6 @@ extension StreamEndpointError: LocalizedError {
 }
 
 extension StreamEndpoint {
-    /// Builds a destination from what the user typed, or explains why it cannot be built.
-    ///
     /// Two conveniences, because both are what people actually do with a Twitch key:
     /// leading and trailing whitespace is stripped (stream keys are copied and pasted, and pick up
     /// a trailing space often enough to be worth handling), and a full ingest URL pasted into the

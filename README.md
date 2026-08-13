@@ -11,11 +11,17 @@ actually live.
   minor version
 - H.264 video, AAC audio, 720×1280 at 30 fps and 2.5 Mbps
 
+HaishinKit 2.2.5 has a known ordering hazard: it forwards each media buffer in its own
+unstructured `Task`, so buffers can in theory be delivered out of order (upstream issue #1889,
+fixed in 2.3.0, not back-ported to the 2.2.x line). This app's wiring tolerates it in practice;
+moving to 2.3.0 once it stabilizes is the upgrade path.
+
 ## Running it
 
 Open `MayflowerStream.xcodeproj` and run the `MayflowerStream` scheme. The camera and the
 microphone only exist on a real device, so the simulator is good for the configuration screen, the
-state machine and the tests, and nothing else.
+state machine and the tests, and nothing else. Running on a real device requires selecting your own
+development team under Signing & Capabilities; the project does not pin one.
 
 To broadcast, enter a stream key from **Twitch → Creator Dashboard → Settings → Stream**. The
 ingest address is filled in already; Twitch lists the alternatives at
@@ -36,10 +42,10 @@ xcodebuild -project MayflowerStream.xcodeproj -scheme MayflowerStream \
 everything that goes wrong into a sentence a person can read. Below it sits one protocol,
 `StreamingSession`, and one implementation of it, `HaishinKitStreamingSession`, which is the only
 file in the app that knows RTMP exists. That single seam is what lets every state transition and
-every error path be tested on a machine with no camera, no microphone and no server — the app has
-75 tests and none of them need hardware. `BroadcastFailure` is the vocabulary the two halves share:
-RTMP status codes, `AVCaptureSession` errors and keychain `OSStatus` values are translated at the
-edge, where the raw failure is still understood, so the UI never has to guess.
+every error path be tested on a machine with no camera, no microphone and no server — the whole
+suite runs without a single piece of hardware attached. `BroadcastFailure` is the vocabulary the
+two halves share: RTMP status codes, `AVCaptureSession` errors and keychain `OSStatus` values are
+translated at the edge, where the raw failure is still understood, so the UI never has to guess.
 
 The state machine has five states — Offline, Connecting, Online, Reconnecting, Error — and they are
 about the *remote stream*, never about the local camera. A running preview with a dead connection is
@@ -114,8 +120,8 @@ keyframes. There is no settings screen, so today `validate()` can never fail. It
 moment there is one — and "let the user pick a quality" is the obvious next ticket — the limits it
 checks (Twitch's published ones) are what stop the app from opening a broadcast the server will
 drop, and it fails with a sentence the user can act on instead of an error from inside the encoder.
-Its cost is one function and eight tests; its absence would be a configuration screen with nothing
-between it and the encoder.
+It is covered by tests now, so it is already trustworthy on the day a settings screen exists to
+call it.
 
 Codecs are not settings: the brief fixes them at H.264 and AAC, so they are constants and are
 reported to the user rather than chosen by them.
@@ -131,9 +137,20 @@ composited frame is then what *every* output receives, so a single overlay lands
 stream and in the on-screen preview at once — what the broadcaster sees is what the viewers see. A
 `MediaMixerOutput` cannot do this: an output only receives finished frames and cannot change them.
 
-A richer overlay — a logo, a viewer count, a lower third — is the same protocol with a different
-implementation. Only `HaishinKitStreamingSession` learns how to draw a new kind; nothing above it
-changes.
+A richer *text* overlay — a longer caption, a viewer count, a lower third — is the same protocol
+with a different implementation; only `HaishinKitStreamingSession` learns how to draw a new kind.
+An overlay whose content is an image is not a drop-in: `StreamOverlay`'s only content method,
+`text(at:)`, returns a `String`, and `HaishinKitStreamingSession` hard-wires a `TextScreenObject`,
+so an image overlay would need the protocol to grow an image-content requirement first — HaishinKit
+already has `ImageScreenObject` for the rendering side, so only the protocol boundary is missing.
+
+The same two seams the overlay uses would carry most of what comes next. Local recording would be
+a `StreamRecorder` added as another mixer output, sitting next to the encoder rather than replacing
+it. Video filters would be a `VideoEffect` registered on the same offscreen-rendering switch the
+overlay already turns on, so they would compose with an overlay rather than compete with it. A
+different wire protocol, such as SRT, would be another `StreamingSession` implementation behind the
+existing one, with everything above the seam — the state machine, the parameters sheet, the UI —
+unaware which one is running.
 
 ### Reconnection
 
@@ -154,3 +171,25 @@ instead. The protocol contract it has to honour — a failed `startPublishing` l
 the next attempt can succeed — is written on the protocol and pinned by the fake session, but a
 regression inside the real adapter would not turn the suite red. That is the honest boundary of
 what can be tested without hardware.
+
+## How the work went
+
+The build order followed the dependency graph rather than the screen order: the settings screen
+first, since it depends on nothing else; then the broadcast state machine and its failure taxonomy,
+written and tested without any hardware attached; then the HaishinKit layer — H.264 and AAC
+configured, RTMP status codes mapped to the human-readable errors the state machine expects — behind
+the `StreamingSession` seam; then the main screen, which by that point was mostly wiring. A
+deliberate hardening pass followed once the pieces were assembled, and it turned up real bugs: races
+between confirmation events and calls still in flight, and lifecycle edge cases around backgrounding.
+Each fix was pinned by a test that was watched failing on the code as it stood before the fix, never
+written after the fact to match it. The rule behind that, held throughout: no behavioral test was
+accepted into the suite without being seen red on the specific defect it guards — a test that has
+never failed proves nothing about the code, only about itself. The last step was live verification
+against a real Twitch channel, walking both the success path and the failure paths, including a
+deliberately wrong stream key, to see the rejection surface as the sentence a user would actually
+read.
+
+AI tools were part of that process, used as an instrument rather than a source of decisions: every
+architectural choice, every line and every comment here was written or reviewed by hand and is one
+the author can defend. The test suite was held to the same standard as the rest of the app — proven
+by breaking the code and watching the test catch it, not trusted because it came back green.

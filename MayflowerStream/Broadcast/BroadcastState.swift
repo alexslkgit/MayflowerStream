@@ -15,18 +15,17 @@ import Foundation
 enum BroadcastState: Equatable, Sendable {
     /// Not broadcasting. The camera may or may not be running; that is a separate question.
     case offline
-    /// Opening the connection and starting to publish, on the user's request.
+    /// On the user's request, unlike `.reconnecting`.
     case connecting
-    /// The server has accepted the stream and frames are going out.
+    /// The server has accepted the publish request. Nothing here confirms frames are still
+    /// arriving — that would need sampling the outgoing bitrate, which this state does not do.
     case online
     /// The stream dropped on its own and is being re-established without the user asking.
     case reconnecting(attempt: Int)
-    /// Stopped because something went wrong. Carries what to tell the user.
     case failed(BroadcastFailure)
 }
 
 extension BroadcastState {
-    /// The short label on the status panel.
     var label: String {
         switch self {
         case .offline: "Offline"
@@ -37,14 +36,12 @@ extension BroadcastState {
         }
     }
 
-    /// True only when frames are actually reaching the server.
     var isLive: Bool {
         if case .online = self { return true }
         return false
     }
 
-    /// True while the app is working on the connection, so the UI can show progress and keep the
-    /// start button out of reach.
+    /// Drives the progress indicator and keeps the start button out of reach.
     var isBusy: Bool {
         switch self {
         case .connecting, .reconnecting: true

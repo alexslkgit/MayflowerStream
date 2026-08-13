@@ -10,8 +10,7 @@ import SwiftUI
 /// The bottom sheet behind the information panel, reachable only while the broadcast is Online.
 ///
 /// It exists to answer one question the task asks explicitly: is the stream actually going out
-/// with the settings it was configured with? So every row shows what was asked for, and shows what
-/// the encoder reported back next to it whenever the two differ.
+/// with the settings it was configured with?
 struct StreamParametersSheet: View {
     let state: BroadcastState
     let duration: String
@@ -79,8 +78,6 @@ struct StreamParametersSheet: View {
         .presentationDetents([.medium, .large])
     }
 
-    /// One row. When the encoder reported something different, both values are shown rather than
-    /// the app quietly picking whichever one looks better.
     @ViewBuilder
     private func row(_ name: String, _ configured: String, applied: String? = nil) -> some View {
         LabeledContent(name) {
@@ -96,8 +93,7 @@ struct StreamParametersSheet: View {
 
     /// The frame rate is the only measured number in the sheet, so a difference here is not the
     /// encoder disagreeing with its settings — it is what the camera managed over the last second.
-    /// It is shown beside the setting and never flagged, which is why it cannot contradict the
-    /// summary line below it.
+    /// It is never flagged, so it cannot contradict the summary line below it.
     @ViewBuilder
     private func measuredRow(_ name: String, _ configured: String, measured: String?) -> some View {
         LabeledContent(name) {

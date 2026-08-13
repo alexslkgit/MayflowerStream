@@ -70,7 +70,6 @@ struct StreamSettingsStoreTests {
         try store.save(StreamSettings(ingestURL: "rtmp://example.com/app", streamKey: "live_secret"))
 
         #expect(defaults.string(forKey: "ingestURL") == "rtmp://example.com/app")
-        // And the key is nowhere in there.
         for (_, value) in defaults.dictionaryRepresentation() {
             #expect((value as? String) != "live_secret", "the stream key was written to UserDefaults")
         }

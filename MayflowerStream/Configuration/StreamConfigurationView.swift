@@ -79,6 +79,8 @@ struct StreamConfigurationView: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .focused($focusedField, equals: .streamKey)
+                .submitLabel(.done)
+                .onSubmit(submitFromStreamKeyField)
         } else {
             SecureField("live_…", text: $model.streamKey)
                 .textInputAutocapitalization(.never)
@@ -87,7 +89,15 @@ struct StreamConfigurationView: View {
                 // pointless — the app already keeps it in the keychain itself.
                 .textContentType(.oneTimeCode)
                 .focused($focusedField, equals: .streamKey)
+                .submitLabel(.done)
+                .onSubmit(submitFromStreamKeyField)
         }
+    }
+
+    private func submitFromStreamKeyField() {
+        guard model.canContinue else { return }
+        focusedField = nil
+        model.saveAndContinue()
     }
 
     private func problemRow(_ problem: StreamConfigurationModel.Problem) -> some View {

@@ -10,9 +10,9 @@ import Foundation
 /// Screen 2's brain: it owns the broadcast state machine, the duration, and the translation of
 /// everything that goes wrong into something the screen can say.
 ///
-/// Two things are kept strictly apart here, because the task is explicit that confusing them is a
-/// failure. `isCapturing` is about the local camera. `state` is about the remote stream. A running
-/// preview with a dead connection is `.offline`, and the panel says Offline.
+/// Two things are kept strictly apart here. `isCapturing` is about the local camera. `state` is
+/// about the remote stream. A running preview with a dead connection is `.offline`, and the panel
+/// says Offline.
 @MainActor
 @Observable
 final class BroadcastController {
@@ -143,7 +143,6 @@ final class BroadcastController {
         notice = nil
     }
 
-    /// Burns the time of day into the picture, or takes it back off. Off when the screen opens.
     func toggleClockOverlay() async {
         isClockOverlayVisible.toggle()
         await session.setOverlay(isClockOverlayVisible ? ClockOverlay() : nil)
@@ -203,8 +202,6 @@ final class BroadcastController {
         state = .offline
     }
 
-    /// The retry offered next to an error message.
-    ///
     /// What failed decides what is tried again. Whether the camera happens to be running does not:
     /// branching on that is how "Try again" under a camera error ends up putting the user on air.
     func retry() async {
@@ -217,7 +214,7 @@ final class BroadcastController {
         }
     }
 
-    /// Closes everything. Used when the screen goes away and when the app is backgrounded.
+    /// Used when the screen goes away and when the app is backgrounded.
     ///
     /// The event reader is deliberately left running: cancelling the consumer of an `AsyncStream`
     /// finishes that stream for good, and a reader started afterwards would receive nothing — the
@@ -380,8 +377,8 @@ extension BroadcastController {
         Self.formatDuration(seconds: elapsedSeconds)
     }
 
-    /// `01:23` up to an hour, `1:02:03` past it. A broadcaster reads the minutes, so they keep
-    /// their two digits and the hours only appear once there are any.
+    /// A broadcaster reads the minutes, so they keep their two digits and the hours only appear
+    /// once there are any.
     static func formatDuration(seconds elapsed: Int) -> String {
         let hours = elapsed / 3600
         let minutes = (elapsed % 3600) / 60
