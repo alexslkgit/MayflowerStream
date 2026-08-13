@@ -158,12 +158,13 @@ final class BroadcastController {
         do {
             try await session.startPublishing(to: endpoint)
             // This call returns only once the server has answered "publish started", so the
-            // return *is* the confirmation. The `.publishing` event says the same thing a moment
-            // later and `goOnline()` is idempotent, so whichever arrives first is enough.
-            guard generation == broadcastGeneration, state == .connecting else {
-                // Either the user stopped while this was in flight, or something else has already
-                // decided what the state is — a drop reported before the server answered, say. The
-                // server is publishing a broadcast nobody is waiting for, so take it down again.
+            // return *is* the confirmation. The `.publishing` event says the same thing and can
+            // arrive first, setting `.online` before this line runs — that is still this broadcast
+            // succeeding, not somebody else's decision, and `goOnline()` is idempotent.
+            guard generation == broadcastGeneration, state == .connecting || state == .online else {
+                // Either the user stopped while this was in flight, or a drop reported before the
+                // server answered has already decided the state. The server is publishing a
+                // broadcast nobody is waiting for, so take it down again.
                 await session.stopPublishing()
                 return
             }

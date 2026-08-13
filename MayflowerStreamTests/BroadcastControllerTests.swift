@@ -124,6 +124,28 @@ struct BroadcastControllerTests {
         #expect(controller.statistics != nil)
     }
 
+    @Test("A confirmation that beats the call home does not tear the broadcast down")
+    func earlyPublishingEventIsStillSuccess() async throws {
+        let session = FakeStreamingSession()
+        session.publishDelay = .milliseconds(80)
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        let starting = Task { await controller.startBroadcast() }
+        try await waitUntil("connecting") { controller.state == .connecting }
+
+        // The `.publishing` event lands while `startPublishing` is still in flight, so the state
+        // is already `.online` when the call returns. That must read as success, not as someone
+        // having cancelled the broadcast.
+        session.emit(.publishing)
+        try await waitUntil("online from the event") { controller.state == .online }
+
+        await starting.value
+
+        #expect(controller.state == .online)
+        #expect(session.publishStopCount == 0, "the broadcast that just started must not be taken down")
+    }
+
     @Test("A server that refuses the key ends in an error naming the key")
     func rejectedKeyIsReported() async {
         let session = FakeStreamingSession()
