@@ -1,3 +1,10 @@
+//
+//  StreamParametersSheet.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import SwiftUI
 
 /// The bottom sheet behind the information panel, reachable only while the broadcast is Online.

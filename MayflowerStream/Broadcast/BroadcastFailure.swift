@@ -1,3 +1,10 @@
+//
+//  BroadcastFailure.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// Everything that can go wrong, expressed in the vocabulary the user cares about rather than the

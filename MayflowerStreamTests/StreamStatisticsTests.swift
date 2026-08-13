@@ -1,3 +1,10 @@
+//
+//  StreamStatisticsTests.swift
+//  MayflowerStreamTests
+//
+//  Created by Slobodianiuk Oleksandr on 13.08.2026.
+//
+
 import Foundation
 import Testing
 
@@ -105,5 +112,27 @@ struct BroadcastConfigurationLimitTests {
         for configuration in outside {
             #expect(throws: BroadcastFailure.self) { try configuration.validate() }
         }
+    }
+}
+
+@Suite("The overlay seam")
+struct StreamOverlayTests {
+
+    @Test("The clock overlay is a corner caption that refreshes every second")
+    func clockOverlayDescribesItself() {
+        let overlay = ClockOverlay()
+        #expect(overlay.placement == .topTrailing)
+        #expect(overlay.refreshInterval == .seconds(1))
+    }
+
+    @Test("The clock overlay shows a time, and a different one a minute later")
+    func clockOverlayShowsTheTime() {
+        let overlay = ClockOverlay()
+        let noon = Date(timeIntervalSince1970: 1_770_000_000)
+
+        let atNoon = overlay.text(at: noon)
+        #expect(!atNoon.isEmpty)
+        #expect(atNoon.contains(":"), "a clock without a colon is not a clock: \(atNoon)")
+        #expect(overlay.text(at: noon.addingTimeInterval(61)) != atNoon)
     }
 }

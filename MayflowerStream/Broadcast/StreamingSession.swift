@@ -1,3 +1,10 @@
+//
+//  StreamingSession.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// Everything the app needs from a streaming library, and nothing else.
@@ -41,6 +48,10 @@ protocol StreamingSession: Sendable {
 
     /// Stops publishing and closes the connection, leaving capture running.
     func stopPublishing() async
+
+    /// Draws an overlay into every frame from now on, or removes the one that is there.
+    /// Safe to call before capture has started; it is applied when the pipeline is built.
+    func setOverlay(_ overlay: (any StreamOverlay)?) async
 
     /// What is actually going out right now, for the parameters sheet.
     func currentStatistics() async -> StreamStatistics

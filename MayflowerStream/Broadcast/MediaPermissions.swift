@@ -1,3 +1,10 @@
+//
+//  MediaPermissions.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import AVFoundation
 
 enum MediaKind: Equatable, Sendable {

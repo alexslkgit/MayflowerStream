@@ -1,3 +1,10 @@
+//
+//  BroadcastController.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// Screen 2's brain: it owns the broadcast state machine, the duration, and the translation of
@@ -16,6 +23,7 @@ final class BroadcastController {
     /// True once the camera and microphone are open. Nothing opens them but `startCapture()`.
     private(set) var isCapturing = false
     private(set) var isMicrophoneMuted = false
+    private(set) var isClockOverlayVisible = false
     private(set) var cameraFacing: CameraFacing
     /// Seconds since the broadcast first went live. Keeps counting through a reconnection, because
     /// it is the length of the broadcast, not the length of the current TCP connection.
@@ -114,6 +122,12 @@ final class BroadcastController {
 
     func dismissNotice() {
         notice = nil
+    }
+
+    /// Burns the time of day into the picture, or takes it back off. Off when the screen opens.
+    func toggleClockOverlay() async {
+        isClockOverlayVisible.toggle()
+        await session.setOverlay(isClockOverlayVisible ? ClockOverlay() : nil)
     }
 
     /// The flag the icon is drawn from is set from what the session reports it applied, never from

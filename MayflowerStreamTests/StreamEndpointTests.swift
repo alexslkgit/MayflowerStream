@@ -1,3 +1,10 @@
+//
+//  StreamEndpointTests.swift
+//  MayflowerStreamTests
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Testing
 
 @testable import MayflowerStream

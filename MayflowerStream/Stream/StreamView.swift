@@ -1,3 +1,10 @@
+//
+//  StreamView.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import HaishinKit
 import SwiftUI
 
@@ -107,12 +114,24 @@ struct StreamView: View {
 
     private var controls: some View {
         HStack {
-            circleButton(
-                systemImage: controller.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
-                label: controller.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
-                tint: controller.isMicrophoneMuted ? .red : .white
-            ) {
-                Task { await controller.toggleMicrophone() }
+            HStack(spacing: 10) {
+                circleButton(
+                    systemImage: controller.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill",
+                    label: controller.isMicrophoneMuted ? "Unmute microphone" : "Mute microphone",
+                    tint: controller.isMicrophoneMuted ? .red : .white
+                ) {
+                    Task { await controller.toggleMicrophone() }
+                }
+
+                // The overlay seam, with something on the end of it. What is drawn here is drawn
+                // into the outgoing frames as well, which is the whole point of it being here.
+                circleButton(
+                    systemImage: "clock.fill",
+                    label: controller.isClockOverlayVisible ? "Hide the clock overlay" : "Show the clock overlay",
+                    tint: controller.isClockOverlayVisible ? .yellow : .white
+                ) {
+                    Task { await controller.toggleClockOverlay() }
+                }
             }
 
             Spacer()

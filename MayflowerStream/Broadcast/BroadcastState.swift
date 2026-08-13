@@ -1,3 +1,10 @@
+//
+//  BroadcastState.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// What the user is told the broadcast is doing.

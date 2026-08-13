@@ -1,3 +1,10 @@
+//
+//  HaishinKitStreamingSession.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import AVFoundation
 import HaishinKit
 import OSLog
@@ -22,6 +29,14 @@ import VideoToolbox
 /// to the server. The preview view is registered as an output of the *mixer*, not of the stream,
 /// so it shows what the camera sees whether or not anything is being published. That is why a
 /// preview can be live while the status panel says Offline.
+///
+/// **Where a visual overlay goes.** Not through `MediaMixerOutput` — an output only receives
+/// finished frames and cannot change them. The mixer's own compositor is `MediaMixer.screen`:
+/// switching `videoMixerSettings.mode` to `.offscreen` makes it draw the camera track into a
+/// `Screen` first, and anything else added as a child of that screen is drawn on top. Because the
+/// composited frame is what every output then receives, one overlay lands in the encoded stream
+/// and in the preview at once. `setOverlay(_:)` below is that, and `ClockOverlay` is a worked
+/// example of it.
 actor HaishinKitStreamingSession: StreamingSession {
 
     nonisolated let events: AsyncStream<StreamingEvent>
@@ -46,6 +61,12 @@ actor HaishinKitStreamingSession: StreamingSession {
     /// long before `pipeline` is assigned. This flag is set before the first await and is what
     /// actually makes building the pipeline twice impossible.
     private var isStartingCapture = false
+
+    /// The overlay survives a stop/start cycle, so turning the clock on and then restarting the
+    /// camera does not silently lose it.
+    private var overlay: (any StreamOverlay)?
+    private var overlayCaption: TextScreenObject?
+    private var overlayTask: Task<Void, Never>?
 
     /// Preview views SwiftUI has created. A view that arrives before capture starts is remembered
     /// until there is a mixer to attach it to; the list is emptied again by `stopCapture`, because
@@ -134,11 +155,17 @@ actor HaishinKitStreamingSession: StreamingSession {
         await pipeline.mixer.startRunning()
 
         self.pipeline = pipeline
+        if let overlay {
+            await installOverlay(overlay, on: pipeline)
+        }
         await observeStatus(of: pipeline)
     }
 
     func stopCapture() async {
         isPublishing = false
+        overlayTask?.cancel()
+        overlayTask = nil
+        overlayCaption = nil
         for task in statusTasks { task.cancel() }
         statusTasks.removeAll()
 
@@ -210,6 +237,77 @@ actor HaishinKitStreamingSession: StreamingSession {
         guard let pipeline else { return }
         _ = try? await pipeline.stream.close()
         try? await pipeline.connection.close()
+    }
+
+    // MARK: - Overlay
+
+    func setOverlay(_ overlay: (any StreamOverlay)?) async {
+        self.overlay = overlay
+        overlayTask?.cancel()
+        overlayTask = nil
+
+        guard let pipeline else { return }
+        guard let overlay else {
+            await removeOverlay(from: pipeline)
+            return
+        }
+        await installOverlay(overlay, on: pipeline)
+    }
+
+    private func installOverlay(_ overlay: any StreamOverlay, on pipeline: Pipeline) async {
+        // Passthrough hands the camera buffer to the encoder untouched, which is what makes it the
+        // cheap default. Compositing requires the mixer to draw the frame itself.
+        var settings = await pipeline.mixer.videoMixerSettings
+        settings.mode = .offscreen
+        await pipeline.mixer.setVideoMixerSettings(settings)
+
+        let mixer = pipeline.mixer
+        let size = configuration.videoSize
+        let placement = overlay.placement
+        let text = overlay.text(at: Date())
+        let caption: TextScreenObject
+        if let existing = overlayCaption {
+            caption = existing
+        } else {
+            caption = await Task { @ScreenActor in TextScreenObject() }.value
+            overlayCaption = caption
+        }
+
+        await Task { @ScreenActor in
+            mixer.screen.size = size
+            caption.horizontalAlignment = placement.horizontalAlignment
+            caption.verticalAlignment = placement.verticalAlignment
+            caption.layoutMargin = .init(top: 24, left: 24, bottom: 24, right: 24)
+            caption.string = text
+            try? mixer.screen.addChild(caption)
+        }.value
+
+        guard let interval = overlay.refreshInterval else { return }
+        overlayTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled { return }
+                await self?.redrawOverlay()
+            }
+        }
+    }
+
+    private func redrawOverlay() async {
+        guard let overlay, let caption = overlayCaption else { return }
+        let text = overlay.text(at: Date())
+        await Task { @ScreenActor in caption.string = text }.value
+    }
+
+    private func removeOverlay(from pipeline: Pipeline) async {
+        let mixer = pipeline.mixer
+        if let caption = overlayCaption {
+            await Task { @ScreenActor in mixer.screen.removeChild(caption) }.value
+        }
+        overlayCaption = nil
+
+        var settings = await pipeline.mixer.videoMixerSettings
+        settings.mode = .passthrough
+        await pipeline.mixer.setVideoMixerSettings(settings)
     }
 
     func currentStatistics() async -> StreamStatistics {
@@ -402,6 +500,24 @@ actor HaishinKitStreamingSession: StreamingSession {
         previewViews.append(previewView)
         if let pipeline {
             await pipeline.mixer.addOutput(previewView)
+        }
+    }
+}
+
+/// The app's own idea of a corner, translated into the library's two alignments.
+@ScreenActor
+private extension StreamOverlayPlacement {
+    var horizontalAlignment: ScreenObject.HorizontalAlignment {
+        switch self {
+        case .topLeading, .bottomLeading: .left
+        case .topTrailing, .bottomTrailing: .right
+        }
+    }
+
+    var verticalAlignment: ScreenObject.VerticalAlignment {
+        switch self {
+        case .topLeading, .topTrailing: .top
+        case .bottomLeading, .bottomTrailing: .bottom
         }
     }
 }

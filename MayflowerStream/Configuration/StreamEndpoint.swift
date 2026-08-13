@@ -1,3 +1,10 @@
+//
+//  StreamEndpoint.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// A validated RTMP publish destination.

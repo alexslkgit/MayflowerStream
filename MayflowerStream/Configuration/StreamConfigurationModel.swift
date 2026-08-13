@@ -1,3 +1,10 @@
+//
+//  StreamConfigurationModel.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// Screen 1. Holds what the user typed, validates it when they try to move on, and hands a

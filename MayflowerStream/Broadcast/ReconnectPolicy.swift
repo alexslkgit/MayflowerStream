@@ -1,3 +1,10 @@
+//
+//  ReconnectPolicy.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 /// How hard the app tries to re-establish a broadcast that dropped on its own.

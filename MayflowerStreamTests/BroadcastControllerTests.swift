@@ -1,3 +1,10 @@
+//
+//  BroadcastControllerTests.swift
+//  MayflowerStreamTests
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 import Testing
 
@@ -612,6 +619,25 @@ struct BroadcastControllerTests {
         try await waitUntil("back online") { controller.state == .online }
 
         #expect(controller.elapsedSeconds >= 1, "the clock restarted at zero after a reconnection")
+    }
+
+    @Test("The clock overlay is off until it is asked for, and reaches the session both ways")
+    func clockOverlayIsOffUntilAskedFor() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        #expect(controller.isClockOverlayVisible == false)
+        #expect(session.overlay == nil)
+
+        await controller.toggleClockOverlay()
+        #expect(controller.isClockOverlayVisible)
+        #expect(session.overlay?.placement == .topTrailing)
+        #expect(session.overlay?.refreshInterval == .seconds(1))
+
+        await controller.toggleClockOverlay()
+        #expect(controller.isClockOverlayVisible == false)
+        #expect(session.overlay == nil)
     }
 }
 

@@ -1,3 +1,10 @@
+//
+//  StreamStatusPanel.swift
+//  MayflowerStream
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import SwiftUI
 
 /// The information panel: what the broadcast is doing, and for how long.

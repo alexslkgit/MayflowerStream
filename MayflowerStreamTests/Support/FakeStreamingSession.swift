@@ -1,3 +1,10 @@
+//
+//  FakeStreamingSession.swift
+//  MayflowerStreamTests
+//
+//  Created by Slobodianiuk Oleksandr on 11.08.2026.
+//
+
 import Foundation
 
 @testable import MayflowerStream
@@ -28,6 +35,7 @@ final class FakeStreamingSession: StreamingSession {
     private(set) var publishStopCount = 0
     private(set) var facing: CameraFacing = .back
     private(set) var isMicrophoneMuted = false
+    private(set) var overlay: (any StreamOverlay)?
     var configuration: BroadcastConfiguration = .default
 
     /// The one library rule that matters to the state machine: RTMP refuses to connect while a
@@ -92,6 +100,10 @@ final class FakeStreamingSession: StreamingSession {
     func stopPublishing() async {
         publishStopCount += 1
         isConnectionOpen = false
+    }
+
+    func setOverlay(_ overlay: (any StreamOverlay)?) async {
+        self.overlay = overlay
     }
 
     func currentStatistics() async -> StreamStatistics {
