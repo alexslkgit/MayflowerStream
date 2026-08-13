@@ -9,9 +9,9 @@ import Foundation
 
 @testable import MayflowerStream
 
-/// A streaming session with no camera, no encoder and no server, driven entirely by the test.
-/// This is the reason `StreamingSession` exists: every state transition and every error path in
-/// `BroadcastController` can be exercised on a machine that has none of the hardware.
+/// A streaming session with no camera, no encoder and no server, driven entirely by the test, so
+/// every state transition and every error path in `BroadcastController` can be exercised on a
+/// machine that has none of the hardware.
 @MainActor
 final class FakeStreamingSession: StreamingSession {
 
@@ -24,15 +24,18 @@ final class FakeStreamingSession: StreamingSession {
     /// Consumed one per `startPublishing` call. `nil` means that call succeeds. When the queue runs
     /// out, every further call succeeds.
     var publishFailures: [BroadcastFailure?] = []
-    /// Makes `startCapture` and `startPublishing` suspend, so a test can act while one is in flight.
+    /// Make `startCapture`, `startPublishing` and `switchCamera` suspend, so a test can act while
+    /// one of them is in flight.
     var captureDelay: Duration = .zero
     var publishDelay: Duration = .zero
+    var switchCameraDelay: Duration = .zero
 
     // What actually happened.
     private(set) var captureStartCount = 0
     private(set) var captureStopCount = 0
     private(set) var publishStartCount = 0
     private(set) var publishStopCount = 0
+    private(set) var switchCameraCount = 0
     private(set) var facing: CameraFacing = .back
     private(set) var isMicrophoneMuted = false
     private(set) var overlay: (any StreamOverlay)?
@@ -74,6 +77,8 @@ final class FakeStreamingSession: StreamingSession {
     }
 
     func switchCamera(to facing: CameraFacing) async throws(BroadcastFailure) {
+        switchCameraCount += 1
+        if switchCameraDelay != .zero { try? await Task.sleep(for: switchCameraDelay) }
         if let switchCameraFailure { throw switchCameraFailure }
         self.facing = facing
     }

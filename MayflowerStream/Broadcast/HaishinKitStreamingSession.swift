@@ -62,6 +62,12 @@ actor HaishinKitStreamingSession: StreamingSession {
     /// actually makes building the pipeline twice impossible.
     private var isStartingCapture = false
 
+    /// Bumped every time the camera is stopped, including when there was nothing to stop. A
+    /// `startCapture` still working its way through the device attaches has published no pipeline
+    /// for `stopCapture` to find, so this counter is the only trace such a stop can leave for it —
+    /// and the start compares it against what it read on entry before keeping anything it built.
+    private(set) var captureGeneration = 0
+
     /// The overlay survives a stop/start cycle, so turning the clock on and then restarting the
     /// camera does not silently lose it.
     private var overlay: (any StreamOverlay)?
@@ -78,6 +84,16 @@ actor HaishinKitStreamingSession: StreamingSession {
     /// when they are the one who ended it.
     private var isPublishing = false
 
+    /// True from the moment `publish()` is sent until the server answers `.publishStart`. Twitch
+    /// refuses a bad stream key by hanging up inside exactly this window — it never sends
+    /// `NetStream.Publish.BadName` — so a close seen here means something quite different from a
+    /// close seen once the broadcast is up.
+    private var isPublishHandshakeInFlight = false
+
+    /// Whether such a close was seen. `publish()` itself only ever reports that nothing answered
+    /// it in time, so this is what tells a refused key apart from a silent server afterwards.
+    private var didCloseDuringPublishHandshake = false
+
     init() {
         var escaped: AsyncStream<StreamingEvent>.Continuation!
         events = AsyncStream(bufferingPolicy: .bufferingNewest(16)) { escaped = $0 }
@@ -90,6 +106,8 @@ actor HaishinKitStreamingSession: StreamingSession {
         guard pipeline == nil, !isStartingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
+        // Read before the first await, so that a stop arriving at any of them is visible at the end.
+        let generation = captureGeneration
         self.configuration = configuration
 
         guard let camera = Self.captureDevice(facing: configuration.cameraFacing) else {
@@ -106,32 +124,28 @@ actor HaishinKitStreamingSession: StreamingSession {
             stream: RTMPStream(connection: connection)
         )
 
-        // Leave nothing half-built behind: whichever step failed, the whole pipeline is dropped.
-        // Each step reports its own reason, because "the camera could not be started" is a lie
-        // when it was the microphone, the audio session or the encoder that refused.
-        func abandonPipeline() async {
-            await pipeline.mixer.stopRunning()
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        }
-
+        // Leave nothing half-built behind: whichever step failed, the whole pipeline is dropped
+        // through the same teardown a successful capture ends with. Each step reports its own
+        // reason, because "the camera could not be started" is a lie when it was the microphone,
+        // the audio session or the encoder that refused.
         do {
             try Self.activateAudioSession()
         } catch {
-            await abandonPipeline()
+            await tearDownCapture(pipeline)
             throw .audioSessionUnavailable
         }
 
         do {
             try await pipeline.mixer.attachVideo(camera)
         } catch {
-            await abandonPipeline()
+            await tearDownCapture(pipeline)
             throw .cameraUnavailable
         }
 
         do {
             try await pipeline.mixer.attachAudio(microphone)
         } catch {
-            await abandonPipeline()
+            await tearDownCapture(pipeline)
             throw .microphoneUnavailable
         }
 
@@ -139,7 +153,7 @@ actor HaishinKitStreamingSession: StreamingSession {
             try await pipeline.mixer.setFrameRate(configuration.frameRate)
             try await Self.applyCodecSettings(configuration, to: pipeline.stream)
         } catch {
-            await abandonPipeline()
+            await tearDownCapture(pipeline)
             if let streamError = error as? RTMPStream.Error, case .unsupportedCodec = streamError {
                 throw .unsupportedConfiguration(
                     reason: "This device cannot encode video in the required format."
@@ -159,20 +173,43 @@ actor HaishinKitStreamingSession: StreamingSession {
             await installOverlay(overlay, on: pipeline)
         }
         await observeStatus(of: pipeline)
+
+        // The app can be backgrounded at any of the awaits above, and until the assignment a few
+        // lines up there is nothing here for `stopCapture` to find: it returns having stopped a
+        // pipeline that did not exist yet, and the camera this call is in the middle of opening
+        // would go on capturing behind a screen the user has left. A moved epoch is that stop, so
+        // everything just built belongs to a capture that is already over and goes now. Tearing
+        // down what a stop landing after the assignment already took down is harmless; leaving a
+        // stop that landed before it with a running pipeline is the bug.
+        if generation != captureGeneration {
+            await tearDownCapture(pipeline)
+        }
     }
 
     func stopCapture() async {
+        // Bumped first, and whether or not there is a pipeline. A stop that arrives while the
+        // camera is still opening has nothing to take down, and this is what tells the start in
+        // flight that its result is no longer wanted.
+        captureGeneration += 1
+        await tearDownCapture(pipeline)
+    }
+
+    /// Every path that ends a capture comes through here: the user's stop, a `startCapture` step
+    /// that failed, and a `startCapture` that finished into a stop already asked for.
+    private func tearDownCapture(_ pipeline: Pipeline?) async {
         isPublishing = false
+        isPublishHandshakeInFlight = false
         overlayTask?.cancel()
         overlayTask = nil
         overlayCaption = nil
         for task in statusTasks { task.cancel() }
         statusTasks.removeAll()
-
-        guard let pipeline else { return }
         self.pipeline = nil
 
+        guard let pipeline else { return }
         await pipeline.mixer.stopRunning()
+        // Detaching is what hands the camera and the microphone back. Dropping the mixer alone
+        // leaves them attached to it, which is why this runs even when the mixer never started.
         try? await pipeline.mixer.attachVideo(nil)
         try? await pipeline.mixer.attachAudio(nil)
         await pipeline.mixer.removeOutput(pipeline.stream)
@@ -215,8 +252,13 @@ actor HaishinKitStreamingSession: StreamingSession {
             throw .unexpected(detail: "startPublishing called before startCapture")
         }
         do {
+            // Every attempt starts from a clean slate, so that nothing a previous one saw can be
+            // read as a reason for this one.
+            didCloseDuringPublishHandshake = false
             _ = try await pipeline.connection.connect(endpoint.connectURL)
+            isPublishHandshakeInFlight = true
             _ = try await pipeline.stream.publish(endpoint.streamKey)
+            isPublishHandshakeInFlight = false
             isPublishing = true
         } catch {
             // `RTMPConnection.connect` refuses outright while the connection is still open. An
@@ -224,9 +266,14 @@ actor HaishinKitStreamingSession: StreamingSession {
             // every later attempt fail instantly with the wrong reason — which also means the
             // automatic reconnection could never succeed.
             isPublishing = false
+            // Read, and the window closed, before anything of ours is closed: our own `close()`
+            // reaches the status handler as the same code the peer's hang-up does.
+            let closedDuringHandshake = didCloseDuringPublishHandshake
+            isPublishHandshakeInFlight = false
+            didCloseDuringPublishHandshake = false
             _ = try? await pipeline.stream.close()
             try? await pipeline.connection.close()
-            let failure = Self.failure(from: error)
+            let failure = Self.publishFailure(from: error, closedDuringHandshake: closedDuringHandshake)
             Self.log.error("publishing failed: \(failure.diagnosticDescription, privacy: .public)")
             throw failure
         }
@@ -234,6 +281,7 @@ actor HaishinKitStreamingSession: StreamingSession {
 
     func stopPublishing() async {
         isPublishing = false
+        isPublishHandshakeInFlight = false
         guard let pipeline else { return }
         _ = try? await pipeline.stream.close()
         try? await pipeline.connection.close()
@@ -384,7 +432,7 @@ actor HaishinKitStreamingSession: StreamingSession {
             // The transport is up. Being live is a stream-level fact, so nothing is reported here.
             break
         case .connectClosed, .connectAppshutdown, .connectNetworkChange:
-            report(.connectionLost)
+            connectionClosed()
         case .connectIdleTimeOut:
             report(.connectionTimedOut)
         case .connectFailed, .connectRejected, .connectInvalidApp:
@@ -397,19 +445,40 @@ actor HaishinKitStreamingSession: StreamingSession {
     private func handleStreamStatus(_ status: RTMPStatus) {
         switch RTMPStream.Code(rawValue: status.code) {
         case .publishStart:
+            // The confirmation the handshake was waiting for. From here a close is a lost
+            // broadcast again, not a refused key.
+            isPublishHandshakeInFlight = false
             continuation.yield(.publishing)
         case .publishBadName:
+            // Never seen from Twitch, which hangs up instead — see `connectionClosed()`. Kept
+            // because a server that does say it should be believed.
             report(.streamKeyRejected)
         case .connectRejected:
             report(.serverRefused)
         case .connectClosed, .connectFailed, .failed:
-            report(.connectionLost)
+            connectionClosed()
         case .unpublishSuccess:
             // We asked for this, or the server acknowledged our close. Not a failure.
             break
         default:
             break
         }
+    }
+
+    /// The connection went away, which means two different things depending on when it happened.
+    ///
+    /// Inside the publish handshake it is Twitch refusing the stream key. Nothing is publishing
+    /// yet, so there is no drop to report and the fact is remembered instead: the `publish()` call
+    /// still in flight is what carries it to the user, and left to itself it can only say that
+    /// nothing answered in time.
+    ///
+    /// Anywhere else it is what it looks like — the broadcast dropped.
+    private func connectionClosed() {
+        guard isPublishHandshakeInFlight else {
+            report(.connectionLost)
+            return
+        }
+        didCloseDuringPublishHandshake = true
     }
 
     /// Reports a drop, but only if there was a broadcast to drop. Everything after this point is
@@ -422,6 +491,21 @@ actor HaishinKitStreamingSession: StreamingSession {
     }
 
     // MARK: - Translating the library's errors
+
+    /// What a publish attempt that never got its `.publishStart` should be called.
+    ///
+    /// A close inside the publish handshake is read as a refused stream key. Twitch answers a bad
+    /// key by hanging up rather than by naming it, so `publish()` waits for a confirmation that is
+    /// never coming and ends in a timeout — which on its own tells the user the server did not
+    /// answer and to check their internet, a dead end for someone whose key is simply wrong.
+    ///
+    /// The window is genuinely ambiguous: a real network drop landing inside it is reported as a
+    /// refused key too. It is the second or two between `publish()` and the server's answer, and
+    /// the two mistakes do not cost the same — "check your stream key" on a working key costs one
+    /// retry, while "check your internet" on a wrong key is a broadcast the user never gets.
+    static func publishFailure(from error: any Error, closedDuringHandshake: Bool) -> BroadcastFailure {
+        closedDuringHandshake ? .streamKeyRejected : failure(from: error)
+    }
 
     private static func failure(from error: any Error) -> BroadcastFailure {
         switch error {

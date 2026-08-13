@@ -24,7 +24,11 @@ final class BroadcastController {
     private(set) var isCapturing = false
     private(set) var isMicrophoneMuted = false
     private(set) var isClockOverlayVisible = false
-    private(set) var cameraFacing: CameraFacing
+    /// Read out of the configuration rather than kept beside it: a second copy of the same fact is
+    /// one forgotten write site away from disagreeing with the first, and the disagreement shows up
+    /// as a button that switches to the camera the user is already on. `configuration` is stored on
+    /// this `@Observable` class, so the screen still sees this change when the camera is switched.
+    var cameraFacing: CameraFacing { configuration.cameraFacing }
     /// Seconds since the broadcast first went live. Keeps counting through a reconnection, because
     /// it is the length of the broadcast, not the length of the current TCP connection.
     private(set) var elapsedSeconds: Int = 0
@@ -51,6 +55,10 @@ final class BroadcastController {
     /// true after the awaits, which is exactly the window a double tap falls into.
     private var isStartingCapture = false
     private var isTogglingMicrophone = false
+    /// Same job for the camera button. Two switches in flight at once race each other over one
+    /// capture session, and the second one reads a `cameraFacing` the first is about to change —
+    /// so a fast double tap decides to switch to the camera it is already switching to.
+    private var isSwitchingCamera = false
     /// Bumped every time the user stops. Anything that was in flight across that moment belongs to
     /// an older broadcast and its result is discarded, so a publish the user has already cancelled
     /// cannot put them back on air.
@@ -68,54 +76,65 @@ final class BroadcastController {
         self.permissions = permissions
         self.configuration = configuration
         self.reconnectPolicy = reconnectPolicy
-        self.cameraFacing = configuration.cameraFacing
         listenForEvents()
     }
 
     // MARK: - Capture
 
-    /// Asks for camera and microphone access and opens them. Called from an explicit tap and from
-    /// nowhere else — in particular, never from `onAppear`.
+    /// Called from an explicit tap and from nowhere else — in particular, never from `onAppear`.
     func startCapture() async {
         guard !isCapturing, !isStartingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
+        // Read before the first await, the same discipline `startBroadcast()` uses one level down.
+        // `shutDown()` and `stopBroadcast()` both move it, and a `shutDown()` landing at any of the
+        // awaits below has already closed the camera this call is opening: the session tears down
+        // its own half and returns normally, so nothing here throws and this counter is the only
+        // thing that says the result is no longer wanted. Every write below is skipped once it has
+        // moved — the permission failures included, because a user who left the screen is owed the
+        // Offline the shutdown left behind rather than an error card about a camera nobody is
+        // looking at any more.
+        let generation = broadcastGeneration
 
         guard await permissions.requestAccess(to: .camera) == .granted else {
-            state = .failed(.cameraAccessDenied)
+            if generation == broadcastGeneration { state = .failed(.cameraAccessDenied) }
             return
         }
         // Audio is not optional: the broadcast is required to carry an AAC track, so a refusal
         // here has to stop the preview rather than quietly produce a silent stream later.
         guard await permissions.requestAccess(to: .microphone) == .granted else {
-            state = .failed(.microphoneAccessDenied)
+            if generation == broadcastGeneration { state = .failed(.microphoneAccessDenied) }
             return
         }
 
         do {
             try await session.startCapture(configuration)
+            // Nothing is left running to take down here — the session did that itself — so what is
+            // left to get wrong is `isCapturing`: setting it now draws a preview and a full set of
+            // controls over a pipeline that no longer exists.
+            guard generation == broadcastGeneration else { return }
             isCapturing = true
             isMicrophoneMuted = false
             notice = nil
-            cameraFacing = configuration.cameraFacing
             if state.failure != nil { state = .offline }
         } catch {
+            guard generation == broadcastGeneration else { return }
             state = .failed(error)
         }
     }
 
     func switchCamera() async {
-        guard isCapturing else { return }
+        guard isCapturing, !isSwitchingCamera else { return }
+        isSwitchingCamera = true
+        defer { isSwitchingCamera = false }
         let target: CameraFacing = cameraFacing == .back ? .front : .back
         do {
             try await session.switchCamera(to: target)
-            cameraFacing = target
             configuration.cameraFacing = target
             notice = nil
         } catch {
             // A missing camera is a normal thing to run into, not a reason to end the broadcast.
-            // Say so, stay on whichever camera is still working, and leave the broadcast state
-            // exactly as it was — it is still true.
+            // The broadcast state is left exactly as it was — it is still true.
             notice = error
         }
     }
@@ -275,12 +294,34 @@ final class BroadcastController {
             for attempt in 1...reconnectPolicy.maximumAttempts {
                 state = .reconnecting(attempt: attempt)
                 try? await Task.sleep(for: reconnectPolicy.delay(attempt))
+                // Cancellation may be read here only because this check can do nothing but return:
+                // nothing has been published yet, so there is nothing that could be left behind.
                 if Task.isCancelled || generation != broadcastGeneration { return }
 
                 do {
                     try await session.startPublishing(to: endpoint)
-                    if Task.isCancelled || generation != broadcastGeneration {
+                    // What happens now is decided from the generation and the state, never from
+                    // `Task.isCancelled`. The server's `.publishing` event routinely arrives before
+                    // this call returns, and the `goOnline()` it triggers cancels this very task —
+                    // so cancellation here usually means the reconnection *worked*, and stopping on
+                    // it would tear down the connection that was just re-established. A user who
+                    // stopped is visible in the generation, which is what `stopBroadcast()` and
+                    // `shutDown()` bump.
+                    guard generation == broadcastGeneration else {
+                        // Stopped while this was in flight. The server is publishing a broadcast
+                        // nobody is waiting for, so take it down again.
                         await session.stopPublishing()
+                        return
+                    }
+                    // The event won the race and `goOnline()` has already put this broadcast back
+                    // on air. Nothing left to do, and nothing to take down.
+                    if state == .online { return }
+                    guard state == .reconnecting(attempt: attempt) else {
+                        // A drop not worth retrying was reported while this was in flight and has
+                        // already ended the broadcast. What the server just accepted belongs to
+                        // nobody, so take it down rather than leave it publishing behind an error.
+                        await session.stopPublishing()
+                        reconnectTask = nil
                         return
                     }
                     // `goOnline()` clears `reconnectTask`, and that is what lets the *next* drop
@@ -289,6 +330,8 @@ final class BroadcastController {
                     await goOnline()
                     return
                 } catch {
+                    // Return-only as well, so cancellation is safe to read here: the attempt threw,
+                    // and a `startPublishing` that throws leaves nothing open behind it.
                     if Task.isCancelled || generation != broadcastGeneration { return }
                     continue
                 }

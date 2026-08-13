@@ -225,6 +225,35 @@ struct BroadcastControllerTests {
         #expect(session.publishStartCount >= 2)
     }
 
+    @Test("A reconnection that succeeds is not torn down by its own confirmation")
+    func earlyPublishingEventDuringReconnectionIsStillSuccess() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        try await waitUntil("online") { controller.state == .online }
+
+        // The reconnection attempt now hangs inside `startPublishing`, which is the window the
+        // server's confirmation arrives in on a real connection.
+        session.publishDelay = .milliseconds(80)
+        let attemptsBefore = session.publishStartCount
+        session.emit(.disconnected(.connectionLost))
+        try await waitUntil("the reconnection attempt is in flight") {
+            session.publishStartCount > attemptsBefore
+        }
+
+        // The `.publishing` event lands first and puts the broadcast back on air, which cancels
+        // the reconnection task. That cancellation is the reconnection succeeding, so the attempt
+        // returning afterwards must not take the connection it just re-established down again.
+        session.emit(.publishing)
+        try await waitUntil("back online from the event") { controller.state == .online }
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(session.publishStopCount == 0, "the reconnection tore down the stream it just restored")
+        #expect(session.isConnectionOpen, "the panel says Online with nothing published")
+        #expect(controller.state == .online)
+    }
+
     @Test("A reconnection that never succeeds gives up and says how many times it tried")
     func givesUpAfterTheLastAttempt() async throws {
         let session = FakeStreamingSession()
@@ -241,6 +270,32 @@ struct BroadcastControllerTests {
         }
 
         #expect(controller.state.isLive == false)
+    }
+
+    @Test("Try again after a reconnection gave up puts the broadcast back on air")
+    func retryAfterGivingUpGoesBackOnline() async throws {
+        let session = FakeStreamingSession()
+        session.publishFailures = [nil, .serverUnreachable, .serverUnreachable, .serverUnreachable]
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.emit(.disconnected(.connectionLost))
+        try await waitUntil("gave up") {
+            controller.state == .failed(.reconnectionGaveUp(attempts: 3))
+        }
+
+        // Giving up is the one failure the app writes about itself, after its own bookkeeping has
+        // been unwound, so the button under it has to still work.
+        await controller.retry()
+
+        try await waitUntil("online again after the retry") { controller.state == .online }
+        #expect(
+            session.captureStartCount == 1,
+            "a connection that ran out of attempts had the camera restarted under it"
+        )
     }
 
     @Test("A rejected key mid-broadcast is reported, not retried")
@@ -296,6 +351,34 @@ struct BroadcastControllerTests {
         }
 
         try await waitUntil("back online") { controller.state == .online }
+    }
+
+    @Test("Stopping as the last attempt fails leaves the app offline, not in an error")
+    func stoppingAsReconnectionGivesUpStaysOffline() async throws {
+        let session = FakeStreamingSession()
+        // One publish that works, then nothing does: this reconnection is going to run out of
+        // attempts, which is the ending that has to be checked against a user who stopped.
+        session.publishFailures = [nil, .serverUnreachable, .serverUnreachable, .serverUnreachable]
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        // A slow last attempt, so the stop lands in the window between it failing and the
+        // reconnection admitting defeat.
+        session.publishDelay = .milliseconds(60)
+        session.emit(.disconnected(.connectionLost))
+        // The initial publish plus three attempts: the third is the last one.
+        try await waitUntil("the last attempt is in flight") { session.publishStartCount == 4 }
+        await controller.stopBroadcast()
+
+        #expect(controller.state == .offline)
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(
+            controller.state == .offline,
+            "the broadcast the user ended came back as \(controller.state)"
+        )
     }
 
     @Test("Stopping during a reconnection stops it")
@@ -587,6 +670,69 @@ struct BroadcastControllerTests {
             session.captureStartCount == 1,
             "the camera was opened \(session.captureStartCount) times"
         )
+    }
+
+    @Test("Backgrounding the app while the camera is opening does not leave a preview behind")
+    func shutDownWhileStartingCaptureLeavesTheCameraOff() async {
+        let session = FakeStreamingSession()
+        // The camera is still opening when the app goes to the background, which is the window the
+        // whole bug lives in: the session takes down what it built and returns without throwing,
+        // so the only thing that can tell this start its result is unwanted is the generation.
+        session.captureDelay = .milliseconds(100)
+        let controller = makeController(session: session)
+
+        async let starting: Void = controller.startCapture()
+        try? await Task.sleep(for: .milliseconds(20))
+        await controller.shutDown()
+        #expect(controller.isCapturing == false)
+
+        await starting
+
+        #expect(
+            controller.isCapturing == false,
+            "the screen shows a preview and a full set of controls with no pipeline behind them"
+        )
+        #expect(controller.state == .offline)
+    }
+
+    @Test("A camera that fails after the app was backgrounded does not leave an error card")
+    func aCaptureFailureAfterShutDownIsNotShown() async {
+        let session = FakeStreamingSession()
+        session.captureDelay = .milliseconds(100)
+        session.captureFailure = .cameraUnavailable
+        let controller = makeController(session: session)
+
+        async let starting: Void = controller.startCapture()
+        try? await Task.sleep(for: .milliseconds(20))
+        await controller.shutDown()
+
+        await starting
+
+        #expect(
+            controller.state == .offline,
+            "a user who left the screen is shown \(controller.state) about a camera already closed"
+        )
+        #expect(controller.isCapturing == false)
+    }
+
+    @Test("Double-tapping the camera button switches the camera once")
+    func doubleTapSwitchesCameraOnce() async {
+        let session = FakeStreamingSession()
+        session.switchCameraDelay = .milliseconds(100)
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        async let first: Void = controller.switchCamera()
+        try? await Task.sleep(for: .milliseconds(10))
+        async let second: Void = controller.switchCamera()
+        _ = await (first, second)
+
+        #expect(
+            session.switchCameraCount == 1,
+            "the camera was switched \(session.switchCameraCount) times"
+        )
+        #expect(controller.cameraFacing == .front)
+        #expect(session.facing == .front)
     }
 
     @Test("A reconnection that succeeds on a later attempt comes back online")
