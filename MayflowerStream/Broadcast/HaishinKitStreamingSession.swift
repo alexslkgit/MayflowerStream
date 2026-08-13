@@ -1,5 +1,6 @@
 import AVFoundation
 import HaishinKit
+import OSLog
 import RTMPHaishinKit
 import VideoToolbox
 
@@ -21,15 +22,14 @@ import VideoToolbox
 /// to the server. The preview view is registered as an output of the *mixer*, not of the stream,
 /// so it shows what the camera sees whether or not anything is being published. That is why a
 /// preview can be live while the status panel says Offline.
-///
-/// **Where a visual overlay would go.** Frames reach the encoder only through
-/// `MediaMixer.addOutput`. Drawing a clock onto the outgoing picture means adding a
-/// `MediaMixerOutput` that receives each `CMSampleBuffer`, composites onto it and appends the
-/// result to the stream — one type, added here, with nothing above this file changing.
 actor HaishinKitStreamingSession: StreamingSession {
 
     nonisolated let events: AsyncStream<StreamingEvent>
     private nonisolated let continuation: AsyncStream<StreamingEvent>.Continuation
+
+    /// The user is told a sentence; this is where the raw reason goes, so a failure on a reviewer's
+    /// phone can be read back out of the device log instead of guessed at.
+    private static let log = Logger(subsystem: "com.slobodianiuk.MayflowerStream", category: "broadcast")
 
     /// The media stack. Nil until the user starts the camera, and nil again after they stop it.
     private struct Pipeline {
@@ -42,8 +42,14 @@ actor HaishinKitStreamingSession: StreamingSession {
     private var statusTasks: [Task<Void, Never>] = []
     private var configuration: BroadcastConfiguration = .default
 
-    /// Preview views SwiftUI has created. They are attached to the mixer when there is one, and
-    /// remembered when there is not, so the preview comes back if capture is restarted.
+    /// An actor releases its isolation at every `await`, so `pipeline == nil` stops being true
+    /// long before `pipeline` is assigned. This flag is set before the first await and is what
+    /// actually makes building the pipeline twice impossible.
+    private var isStartingCapture = false
+
+    /// Preview views SwiftUI has created. A view that arrives before capture starts is remembered
+    /// until there is a mixer to attach it to; the list is emptied again by `stopCapture`, because
+    /// SwiftUI destroys those views along with the preview and builds new ones next time.
     private var previewViews: [MTHKView] = []
 
     /// Whether a drop should be reported. Closing the connection ourselves produces the same RTMP
@@ -60,14 +66,16 @@ actor HaishinKitStreamingSession: StreamingSession {
     // MARK: - Capture
 
     func startCapture(_ configuration: BroadcastConfiguration) async throws(BroadcastFailure) {
-        guard pipeline == nil else { return }
+        guard pipeline == nil, !isStartingCapture else { return }
+        isStartingCapture = true
+        defer { isStartingCapture = false }
         self.configuration = configuration
 
         guard let camera = Self.captureDevice(facing: configuration.cameraFacing) else {
             throw .cameraMissing(configuration.cameraFacing)
         }
         guard let microphone = AVCaptureDevice.default(for: .audio) else {
-            throw .cameraUnavailable
+            throw .microphoneUnavailable
         }
 
         let connection = RTMPConnection()
@@ -77,23 +85,53 @@ actor HaishinKitStreamingSession: StreamingSession {
             stream: RTMPStream(connection: connection)
         )
 
-        do {
-            try Self.activateAudioSession()
-            try await pipeline.mixer.attachVideo(camera)
-            try await pipeline.mixer.attachAudio(microphone)
-            try await pipeline.mixer.setFrameRate(configuration.frameRate)
-            try await Self.applyCodecSettings(configuration, to: pipeline.stream)
-            await pipeline.mixer.addOutput(pipeline.stream)
-            for view in previewViews {
-                await pipeline.mixer.addOutput(view)
-            }
-            await pipeline.mixer.startRunning()
-        } catch {
-            // Leave nothing half-built behind: if any step failed, the whole pipeline is dropped.
+        // Leave nothing half-built behind: whichever step failed, the whole pipeline is dropped.
+        // Each step reports its own reason, because "the camera could not be started" is a lie
+        // when it was the microphone, the audio session or the encoder that refused.
+        func abandonPipeline() async {
             await pipeline.mixer.stopRunning()
             try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+
+        do {
+            try Self.activateAudioSession()
+        } catch {
+            await abandonPipeline()
+            throw .audioSessionUnavailable
+        }
+
+        do {
+            try await pipeline.mixer.attachVideo(camera)
+        } catch {
+            await abandonPipeline()
             throw .cameraUnavailable
         }
+
+        do {
+            try await pipeline.mixer.attachAudio(microphone)
+        } catch {
+            await abandonPipeline()
+            throw .microphoneUnavailable
+        }
+
+        do {
+            try await pipeline.mixer.setFrameRate(configuration.frameRate)
+            try await Self.applyCodecSettings(configuration, to: pipeline.stream)
+        } catch {
+            await abandonPipeline()
+            if let streamError = error as? RTMPStream.Error, case .unsupportedCodec = streamError {
+                throw .unsupportedConfiguration(
+                    reason: "This device cannot encode video in the required format."
+                )
+            }
+            throw .encoderConfigurationFailed
+        }
+
+        await pipeline.mixer.addOutput(pipeline.stream)
+        for view in previewViews {
+            await pipeline.mixer.addOutput(view)
+        }
+        await pipeline.mixer.startRunning()
 
         self.pipeline = pipeline
         await observeStatus(of: pipeline)
@@ -114,6 +152,9 @@ actor HaishinKitStreamingSession: StreamingSession {
         for view in previewViews {
             await pipeline.mixer.removeOutput(view)
         }
+        // The views themselves go away with the screen; keeping them here would retain one more
+        // dead view per stop, each still being handed frames the next time capture starts.
+        previewViews.removeAll()
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
@@ -130,11 +171,14 @@ actor HaishinKitStreamingSession: StreamingSession {
         configuration.cameraFacing = facing
     }
 
-    func setMicrophoneMuted(_ isMuted: Bool) async {
-        guard let pipeline else { return }
+    func setMicrophoneMuted(_ isMuted: Bool) async -> Bool {
+        guard let pipeline else { return isMuted }
         var settings = await pipeline.mixer.audioMixerSettings
         settings.isMuted = isMuted
         await pipeline.mixer.setAudioMixerSettings(settings)
+        // What was actually applied, read back rather than assumed, so the icon on screen can
+        // never claim something the mixer is not doing.
+        return await pipeline.mixer.audioMixerSettings.isMuted
     }
 
     // MARK: - Publishing
@@ -147,12 +191,17 @@ actor HaishinKitStreamingSession: StreamingSession {
             _ = try await pipeline.connection.connect(endpoint.connectURL)
             _ = try await pipeline.stream.publish(endpoint.streamKey)
             isPublishing = true
-        } catch let error as RTMPStream.Error {
-            throw Self.failure(from: error)
-        } catch let error as RTMPConnection.Error {
-            throw Self.failure(from: error)
         } catch {
-            throw .unexpected(detail: String(describing: error))
+            // `RTMPConnection.connect` refuses outright while the connection is still open. An
+            // attempt that failed at the publish step and left the socket up would therefore make
+            // every later attempt fail instantly with the wrong reason — which also means the
+            // automatic reconnection could never succeed.
+            isPublishing = false
+            _ = try? await pipeline.stream.close()
+            try? await pipeline.connection.close()
+            let failure = Self.failure(from: error)
+            Self.log.error("publishing failed: \(failure.diagnosticDescription, privacy: .public)")
+            throw failure
         }
     }
 
@@ -270,10 +319,19 @@ actor HaishinKitStreamingSession: StreamingSession {
     private func report(_ failure: BroadcastFailure) {
         guard isPublishing else { return }
         isPublishing = false
+        Self.log.error("the broadcast dropped: \(failure.diagnosticDescription, privacy: .public)")
         continuation.yield(.disconnected(failure))
     }
 
     // MARK: - Translating the library's errors
+
+    private static func failure(from error: any Error) -> BroadcastFailure {
+        switch error {
+        case let error as RTMPStream.Error: failure(from: error)
+        case let error as RTMPConnection.Error: failure(from: error)
+        default: .unexpected(detail: String(describing: error))
+        }
+    }
 
     private static func failure(from error: RTMPConnection.Error) -> BroadcastFailure {
         switch error {
@@ -330,7 +388,9 @@ actor HaishinKitStreamingSession: StreamingSession {
         try session.setCategory(
             .playAndRecord,
             mode: .videoRecording,
-            options: [.defaultToSpeaker, .allowBluetooth]
+            // `allowBluetoothHFP` is the same option under its current name, available since
+            // iOS 1.0, so the deployment target of 17.0 needs no availability check for it.
+            options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
         try session.setActive(true)
     }

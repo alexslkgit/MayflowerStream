@@ -31,9 +31,11 @@ final class StreamConfigurationModel {
         let suggestion: String?
     }
 
+    /// Only an empty screen keeps the button out of reach. A missing key is a thing to be told
+    /// about on submit, not silently prevented — and an address pasted with the key still on the
+    /// end is a valid entry with an empty key field, which a stricter gate would refuse.
     var canContinue: Bool {
         !ingestURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !streamKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Clears the last complaint. Called as the user edits, so a message never outlives the entry
@@ -45,12 +47,14 @@ final class StreamConfigurationModel {
     func saveAndContinue() {
         do {
             let endpoint = try StreamEndpoint.make(ingestURL: ingestURL, streamKey: streamKey)
-            // Write back the normalised values so the user sees exactly what will be used — if we
-            // split a pasted URL, that has to be visible, not silent.
+            try store.save(StreamSettings(ingestURL: endpoint.connectURL, streamKey: endpoint.streamKey))
+
+            // Only now write the normalised values back, so the user sees exactly what will be
+            // used — if a pasted URL was split, that has to be visible. It happens after the save
+            // because the screen clears the last complaint whenever these fields change, which
+            // would wipe the message a failed save had just produced.
             ingestURL = endpoint.connectURL
             streamKey = endpoint.streamKey
-
-            try store.save(StreamSettings(ingestURL: endpoint.connectURL, streamKey: endpoint.streamKey))
             problem = nil
             self.endpoint = endpoint
         } catch let error as StreamEndpointError {

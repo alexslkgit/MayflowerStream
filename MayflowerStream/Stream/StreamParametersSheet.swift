@@ -31,8 +31,8 @@ struct StreamParametersSheet: View {
                             kilobits(statistics.configured.videoBitRate),
                             applied: statistics.appliedVideoBitRate.map(kilobits)
                         )
-                        row("Frame rate", "\(Int(statistics.configured.frameRate)) fps",
-                            applied: statistics.currentFrameRate.map { "\($0) fps" })
+                        measuredRow("Frame rate", "\(Int(statistics.configured.frameRate)) fps",
+                                    measured: statistics.currentFrameRate.map { "\($0) fps" })
                         row("Keyframe interval", "\(Int(statistics.configured.keyFrameIntervalSeconds)) s")
                     }
 
@@ -49,7 +49,7 @@ struct StreamParametersSheet: View {
                         Label {
                             Text(statistics.matchesConfiguration
                                  ? "The outgoing stream matches these settings."
-                                 : "The encoder is not using every setting as configured. The values in grey are what it reported.")
+                                 : "The encoder is not using every setting as configured. The rows in orange show what it reported instead.")
                         } icon: {
                             Image(systemName: statistics.matchesConfiguration
                                   ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -80,6 +80,23 @@ struct StreamParametersSheet: View {
             if let applied, applied != configured {
                 Text("\(configured) → \(applied)")
                     .foregroundStyle(.orange)
+            } else {
+                Text(configured)
+            }
+        }
+        .monospacedDigit()
+    }
+
+    /// The frame rate is the only measured number in the sheet, so a difference here is not the
+    /// encoder disagreeing with its settings — it is what the camera managed over the last second.
+    /// It is shown beside the setting and never flagged, which is why it cannot contradict the
+    /// summary line below it.
+    @ViewBuilder
+    private func measuredRow(_ name: String, _ configured: String, measured: String?) -> some View {
+        LabeledContent(name) {
+            if let measured, measured != configured {
+                Text("\(configured), \(measured) now")
+                    .foregroundStyle(.secondary)
             } else {
                 Text(configured)
             }

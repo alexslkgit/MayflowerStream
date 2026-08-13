@@ -17,6 +17,9 @@ final class FakeStreamingSession: StreamingSession {
     /// Consumed one per `startPublishing` call. `nil` means that call succeeds. When the queue runs
     /// out, every further call succeeds.
     var publishFailures: [BroadcastFailure?] = []
+    /// Makes `startCapture` and `startPublishing` suspend, so a test can act while one is in flight.
+    var captureDelay: Duration = .zero
+    var publishDelay: Duration = .zero
 
     // What actually happened.
     private(set) var captureStartCount = 0
@@ -27,6 +30,11 @@ final class FakeStreamingSession: StreamingSession {
     private(set) var isMicrophoneMuted = false
     var configuration: BroadcastConfiguration = .default
 
+    /// The one library rule that matters to the state machine: RTMP refuses to connect while a
+    /// connection is already open. Modelling it here is what makes "a failed attempt leaves
+    /// nothing open" — the contract written on `StreamingSession.startPublishing` — testable.
+    private(set) var isConnectionOpen = false
+
     init() {
         var escaped: AsyncStream<StreamingEvent>.Continuation!
         events = AsyncStream { escaped = $0 }
@@ -34,7 +42,12 @@ final class FakeStreamingSession: StreamingSession {
     }
 
     /// Pretend the server said something.
-    nonisolated func emit(_ event: StreamingEvent) {
+    ///
+    /// A drop normally takes the connection with it. `closingConnection: false` is the other case
+    /// — the publish ends while the socket stays up — which is where a session that does not clean
+    /// up after itself makes every following attempt fail for the wrong reason.
+    func emit(_ event: StreamingEvent, closingConnection: Bool = true) {
+        if case .disconnected = event, closingConnection { isConnectionOpen = false }
         continuation.yield(event)
     }
 
@@ -42,6 +55,7 @@ final class FakeStreamingSession: StreamingSession {
 
     func startCapture(_ configuration: BroadcastConfiguration) async throws(BroadcastFailure) {
         captureStartCount += 1
+        if captureDelay != .zero { try? await Task.sleep(for: captureDelay) }
         if let captureFailure { throw captureFailure }
         self.configuration = configuration
         facing = configuration.cameraFacing
@@ -56,19 +70,28 @@ final class FakeStreamingSession: StreamingSession {
         self.facing = facing
     }
 
-    func setMicrophoneMuted(_ isMuted: Bool) async {
+    func setMicrophoneMuted(_ isMuted: Bool) async -> Bool {
         isMicrophoneMuted = isMuted
+        return isMuted
     }
 
     func startPublishing(to endpoint: StreamEndpoint) async throws(BroadcastFailure) {
         publishStartCount += 1
+        if isConnectionOpen {
+            isConnectionOpen = false
+            throw .unexpected(detail: "the connection was still open")
+        }
+        isConnectionOpen = true
+        if publishDelay != .zero { try? await Task.sleep(for: publishDelay) }
         if !publishFailures.isEmpty, let failure = publishFailures.removeFirst() {
+            isConnectionOpen = false
             throw failure
         }
     }
 
     func stopPublishing() async {
         publishStopCount += 1
+        isConnectionOpen = false
     }
 
     func currentStatistics() async -> StreamStatistics {

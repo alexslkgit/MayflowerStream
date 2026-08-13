@@ -34,6 +34,9 @@ struct StreamView: View {
             VStack {
                 statusPanel
                 Spacer()
+                if let notice = controller.notice {
+                    noticeCard(notice)
+                }
                 if let failure = controller.state.failure {
                     failureCard(failure)
                 }
@@ -173,6 +176,26 @@ struct StreamView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+    }
+
+    /// Something went wrong that did not stop the broadcast. It is a card and not the status panel
+    /// on purpose: while this is on screen the panel still says Online, because the stream still is.
+    private func noticeCard(_ notice: BroadcastFailure) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(notice.message, systemImage: "exclamationmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+            if let recovery = notice.recovery {
+                Text(recovery)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Button("OK") { controller.dismissNotice() }
+                .buttonStyle(.bordered)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.bottom, 8)
     }
 
     private func failureCard(_ failure: BroadcastFailure) -> some View {

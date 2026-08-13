@@ -15,9 +15,16 @@ enum BroadcastFailure: Error, Equatable, Sendable {
     case microphoneAccessDenied
     case cameraMissing(CameraFacing)
     case cameraUnavailable
+    case microphoneUnavailable
+    /// The system would not give the app a recording audio session — normally another app holding
+    /// it, which is a different problem from a microphone that will not open.
+    case audioSessionUnavailable
 
     // Configuration
     case unsupportedConfiguration(reason: String)
+    /// The encoder refused the settings it was given. Distinct from `unsupportedConfiguration`,
+    /// which is caught by validation before anything is opened.
+    case encoderConfigurationFailed
 
     // Connection
     case serverUnreachable
@@ -55,8 +62,14 @@ extension BroadcastFailure {
             "This device has no \(facing.describedForUser) camera."
         case .cameraUnavailable:
             "The camera could not be started."
+        case .microphoneUnavailable:
+            "The microphone could not be started."
+        case .audioSessionUnavailable:
+            "Sound could not be prepared for recording."
         case .unsupportedConfiguration(let reason):
             reason
+        case .encoderConfigurationFailed:
+            "The video encoder could not be set up on this device."
         case .serverUnreachable:
             "The streaming server could not be reached."
         case .connectionTimedOut:
@@ -83,8 +96,14 @@ extension BroadcastFailure {
             "Switch to the other camera."
         case .cameraUnavailable:
             "Close any other app that might be using the camera and try again."
+        case .microphoneUnavailable:
+            "Close any other app that might be using the microphone and try again."
+        case .audioSessionUnavailable:
+            "Stop any other app that is playing or recording sound, then try again."
         case .unsupportedConfiguration:
             nil
+        case .encoderConfigurationFailed:
+            "Try again. If it keeps happening, restart the app."
         case .serverUnreachable, .connectionTimedOut:
             "Check your internet connection and try again."
         case .streamKeyRejected:
@@ -108,8 +127,24 @@ extension BroadcastFailure {
         case .connectionLost, .connectionTimedOut, .serverUnreachable:
             true
         case .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing, .cameraUnavailable,
-             .unsupportedConfiguration, .streamKeyRejected, .serverRefused, .reconnectionGaveUp,
+             .microphoneUnavailable, .audioSessionUnavailable, .unsupportedConfiguration,
+             .encoderConfigurationFailed, .streamKeyRejected, .serverRefused, .reconnectionGaveUp,
              .unexpected:
+            false
+        }
+    }
+
+    /// Whether this is about the local camera and microphone rather than about the broadcast.
+    ///
+    /// It decides what "Try again" retries. That has to be read off the failure: the camera being
+    /// open says nothing about which of the two things went wrong.
+    var isDeviceProblem: Bool {
+        switch self {
+        case .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing, .cameraUnavailable,
+             .microphoneUnavailable, .audioSessionUnavailable, .encoderConfigurationFailed:
+            true
+        case .unsupportedConfiguration, .serverUnreachable, .connectionTimedOut, .streamKeyRejected,
+             .serverRefused, .connectionLost, .reconnectionGaveUp, .unexpected:
             false
         }
     }

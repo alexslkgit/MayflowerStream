@@ -27,10 +27,16 @@ protocol StreamingSession: Sendable {
 
     func switchCamera(to facing: CameraFacing) async throws(BroadcastFailure)
 
-    func setMicrophoneMuted(_ isMuted: Bool) async
+    /// Applies the setting and returns what is actually in force, so the caller never has to
+    /// assume its own request took effect.
+    func setMicrophoneMuted(_ isMuted: Bool) async -> Bool
 
     /// Connects and begins publishing. Throws if the server rejects the attempt outright; a
     /// connection that succeeds and then drops arrives as a `.disconnected` event instead.
+    ///
+    /// A call that throws must leave nothing open behind it: the next call has to be able to
+    /// succeed, because that next call is how both the retry button and automatic reconnection
+    /// work.
     func startPublishing(to endpoint: StreamEndpoint) async throws(BroadcastFailure)
 
     /// Stops publishing and closes the connection, leaving capture running.
@@ -87,6 +93,10 @@ struct StreamStatistics: Equatable, Sendable {
 
     /// True when every number the encoder reported matches what it was asked for. Drives the one
     /// line in the sheet that says whether the outgoing stream is what was configured.
+    ///
+    /// `currentFrameRate` is deliberately not part of this. It is measured rather than reported,
+    /// and a camera delivering 29 of the 30 frames it was asked for is not a misconfigured
+    /// encoder — counting it here would put a warning on every healthy broadcast.
     var matchesConfiguration: Bool {
         if let appliedVideoSize, appliedVideoSize != configured.videoSize { return false }
         if let appliedVideoBitRate, appliedVideoBitRate != configured.videoBitRate { return false }

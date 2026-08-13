@@ -103,17 +103,12 @@ struct KeychainError: Error, LocalizedError {
     var recoverySuggestion: String? {
         "Try again. If it keeps happening, restarting the app usually clears it."
     }
-
-    /// Not shown to the user — this is what goes in a log or a bug report.
-    var technicalDescription: String {
-        "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "unknown")"
-    }
 }
 
 /// Backs SwiftUI previews and unit tests, so neither touches the real keychain.
 @MainActor
 final class InMemoryStreamSettingsStore: StreamSettingsStoring {
-    private(set) var settings: StreamSettings
+    private var settings: StreamSettings
     /// Set to make `save` fail, so the "we could not save this" path can be exercised.
     var saveFailure: (any Error)?
 
