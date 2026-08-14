@@ -10,13 +10,11 @@ import Testing
 
 @testable import MayflowerStream
 
-/// The one decision in the session that cannot be reached from `FakeStreamingSession`, pulled out
-/// as a function precisely so it can be checked here without a camera or a server.
+/// The one decision in the session that cannot be reached from `FakeStreamingSession`, pulled out as a function so it can be checked here without a camera or a server.
 @Suite("What a publish that was never confirmed is called")
 struct PublishHandshakeFailureTests {
 
-    /// Stands in for whatever the library throws when its publish request goes unanswered. What it
-    /// is does not matter to the decision under test.
+    /// Stands in for whatever the library throws when its publish request goes unanswered; what it is does not matter to the decision under test.
     private struct LibraryError: Error {}
 
     @Test("A connection closed inside the publish handshake is a refused stream key")
@@ -45,16 +43,7 @@ struct PublishHandshakeFailureTests {
     }
 }
 
-/// Backgrounding the app while the camera is still opening. `startCapture` is awaiting its device
-/// attaches, so it holds a pipeline nothing else can see yet, and the `stopCapture` that arrives
-/// there finds nothing to stop — it is the epoch it leaves behind that tells the start in flight
-/// its result is no longer wanted.
-///
-/// Only the half of that discipline which needs no camera is pinned here: that the epoch moves for
-/// a stop with nothing to stop. The other half — the start reading it back after its awaits and
-/// tearing down what it has just built — cannot be reached on a machine with no capture device,
-/// because `startCapture` throws `.cameraMissing` before it ever reaches an await. It is verified
-/// on a device, like the rest of `HaishinKitStreamingSession`.
+/// Only the half of the epoch discipline reachable without a camera is pinned here — that a stop with nothing to stop still moves it; the other half needs a real capture device and is verified there.
 @Suite("Stopping a capture that has not finished starting")
 struct CaptureGenerationTests {
 
@@ -80,8 +69,39 @@ struct CaptureGenerationTests {
         await session.stopCapture()
         await session.stopCapture()
 
-        // A flag would answer the first stop and then be indistinguishable from the second. A start
-        // that began between the two has to be able to tell them apart.
+        // A flag would answer the first stop and be indistinguishable from the second; a start between the two has to tell them apart.
         #expect(await session.captureGeneration == before + 2)
+    }
+}
+
+/// The event stream is read by a task that is never cancelled (see `BroadcastController.shutDown()`), so finishing it is the session's job and nobody else's.
+@MainActor
+@Suite("What becomes of the event stream when the session goes away")
+struct EventStreamLifetimeTests {
+
+    /// Written by the reader task and read by the test, so it cannot be a local variable.
+    @MainActor
+    private final class ReaderCompletion {
+        var didFinish = false
+    }
+
+    @Test("A session that is released finishes its event stream, so its reader is not left suspended")
+    func aReleasedSessionFinishesItsEventStream() async throws {
+        let completion = ReaderCompletion()
+        let events: AsyncStream<StreamingEvent>
+        // Only the stream is kept, matching what the controller holds: nothing points at the session once its screen is gone.
+        do {
+            let session = HaishinKitStreamingSession()
+            events = session.events
+        }
+
+        Task {
+            for await _ in events {}
+            completion.didFinish = true
+        }
+
+        try await waitUntil("the reader of a released session's stream to finish") {
+            completion.didFinish
+        }
     }
 }

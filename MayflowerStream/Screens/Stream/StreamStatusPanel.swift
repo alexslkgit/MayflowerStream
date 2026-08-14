@@ -7,15 +7,14 @@
 
 import SwiftUI
 
-/// The information panel: what the broadcast is doing, and for how long.
-///
-/// It is the only thing on this screen that answers "am I live?", so it never borrows confidence
-/// from the preview underneath it. The dot's red is kept for live and nothing else, so on-air is
-/// never ambiguous.
+private enum Strings {
+    static let parametersHint = "Shows the stream parameters"
+}
+
 struct StreamStatusPanel: View {
     let state: BroadcastState
     let duration: String
-    /// Set only when tapping does something, so the panel does not pretend to be a button.
+    // Non-nil only when tapping does something, so the panel does not pretend to be a button.
     let onTap: (() -> Void)?
 
     var body: some View {
@@ -48,7 +47,7 @@ struct StreamStatusPanel: View {
         if let onTap {
             Button(action: onTap) { content }
                 .buttonStyle(.plain)
-                .accessibilityHint("Shows the stream parameters")
+                .accessibilityHint(Strings.parametersHint)
         } else {
             content
         }
@@ -56,7 +55,7 @@ struct StreamStatusPanel: View {
 
     private var title: String {
         if case .reconnecting(let attempt) = state {
-            return "Reconnecting (\(attempt))"
+            return "Reconnecting (attempt \(attempt))"
         }
         return state.label
     }

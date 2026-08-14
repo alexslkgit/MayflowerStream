@@ -7,10 +7,25 @@
 
 import SwiftUI
 
-/// The bottom sheet behind the information panel, reachable only while the broadcast is Online.
-///
-/// It exists to answer one question the task asks explicitly: is the stream actually going out
-/// with the settings it was configured with?
+private enum Strings {
+    static let navigationTitle = "Stream parameters"
+    static let broadcastSection = "Broadcast"
+    static let status = "Status"
+    static let duration = "Duration"
+    static let dataRate = "Data rate"
+    static let videoSection = "Video"
+    static let codec = "Codec"
+    static let resolution = "Resolution"
+    static let bitrate = "Bitrate"
+    static let frameRate = "Frame rate"
+    static let keyframeInterval = "Keyframe interval"
+    static let audioSection = "Audio"
+    static let matches = "The outgoing stream matches these settings."
+    static let mismatch = "The encoder is not using every setting as configured. The rows in orange show what it reported instead."
+    static let measuredFooter = "Frame rate and data rate are measured: the data rate is what actually left the device over the last second, audio and protocol overhead included, which is why it reads a little above the configured bitrates. Everything else is read back from the encoder."
+    static let noParameters = "No stream parameters yet."
+}
+
 struct StreamParametersSheet: View {
     let state: BroadcastState
     let duration: String
@@ -19,33 +34,42 @@ struct StreamParametersSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Broadcast") {
-                    row("Status", state.label)
-                    row("Duration", duration)
+                Section(Strings.broadcastSection) {
+                    row(Strings.status, state.label)
+                    row(Strings.duration, duration)
+                    if let statistics {
+                        // The number the on-air HUD shows, next to the two bitrates it should be
+                        // compared against.
+                        measuredRow(
+                            Strings.dataRate,
+                            kilobits(statistics.configured.videoBitRate + statistics.configured.audioBitRate),
+                            measured: statistics.currentBytesPerSecond.map { kilobits($0 * 8) }
+                        )
+                    }
                 }
 
                 if let statistics {
-                    Section("Video") {
-                        row("Codec", BroadcastConfiguration.videoCodec, applied: statistics.appliedVideoCodec)
+                    Section(Strings.videoSection) {
+                        row(Strings.codec, BroadcastConfiguration.videoCodec, applied: statistics.appliedVideoCodec)
                         row(
-                            "Resolution",
+                            Strings.resolution,
                             format(statistics.configured.videoSize),
                             applied: statistics.appliedVideoSize.map(format)
                         )
                         row(
-                            "Bitrate",
+                            Strings.bitrate,
                             kilobits(statistics.configured.videoBitRate),
                             applied: statistics.appliedVideoBitRate.map(kilobits)
                         )
-                        measuredRow("Frame rate", "\(Int(statistics.configured.frameRate)) fps",
+                        measuredRow(Strings.frameRate, "\(Int(statistics.configured.frameRate)) fps",
                                     measured: statistics.currentFrameRate.map { "\($0) fps" })
-                        row("Keyframe interval", "\(Int(statistics.configured.keyFrameIntervalSeconds)) s")
+                        row(Strings.keyframeInterval, "\(Int(statistics.configured.keyFrameIntervalSeconds)) s")
                     }
 
-                    Section("Audio") {
-                        row("Codec", BroadcastConfiguration.audioCodec, applied: statistics.appliedAudioCodec)
+                    Section(Strings.audioSection) {
+                        row(Strings.codec, BroadcastConfiguration.audioCodec, applied: statistics.appliedAudioCodec)
                         row(
-                            "Bitrate",
+                            Strings.bitrate,
                             kilobits(statistics.configured.audioBitRate),
                             applied: statistics.appliedAudioBitRate.map(kilobits)
                         )
@@ -53,9 +77,7 @@ struct StreamParametersSheet: View {
 
                     Section {
                         Label {
-                            Text(statistics.matchesConfiguration
-                                 ? "The outgoing stream matches these settings."
-                                 : "The encoder is not using every setting as configured. The rows in orange show what it reported instead.")
+                            Text(statistics.matchesConfiguration ? Strings.matches : Strings.mismatch)
                         } icon: {
                             Image(systemName: statistics.matchesConfiguration
                                   ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -63,16 +85,16 @@ struct StreamParametersSheet: View {
                         }
                         .font(.footnote)
                     } footer: {
-                        Text("Frame rate is measured. Everything else is read back from the encoder.")
+                        Text(Strings.measuredFooter)
                     }
                 } else {
                     Section {
-                        Text("No stream parameters yet.")
+                        Text(Strings.noParameters)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            .navigationTitle("Stream parameters")
+            .navigationTitle(Strings.navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
@@ -91,9 +113,9 @@ struct StreamParametersSheet: View {
         .monospacedDigit()
     }
 
-    /// The frame rate is the only measured number in the sheet, so a difference here is not the
-    /// encoder disagreeing with its settings — it is what the camera managed over the last second.
-    /// It is never flagged, so it cannot contradict the summary line below it.
+    // Measured values are never flagged, so they cannot contradict the summary line above: a
+    // difference here is what the camera and network managed, not the encoder disagreeing with
+    // its settings.
     @ViewBuilder
     private func measuredRow(_ name: String, _ configured: String, measured: String?) -> some View {
         LabeledContent(name) {
@@ -127,7 +149,8 @@ struct StreamParametersSheet: View {
             appliedVideoCodec: "H.264",
             appliedAudioBitRate: 128_000,
             appliedAudioCodec: "AAC",
-            currentFrameRate: 30
+            currentFrameRate: 30,
+            currentBytesPerSecond: 328_000
         )
     )
 }

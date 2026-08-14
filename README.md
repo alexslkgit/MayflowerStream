@@ -1,5 +1,14 @@
 # MayflowerStream
 
+**Testing on a device? Please launch the app from the home screen, not under the Xcode
+debugger.** The RTMP pipeline is soft real-time, and an attached debugger — Swift throw
+interception, Main Thread Checker, Metal API validation, unoptimized package builds — can stall
+the main thread for seconds at exactly the moments the app is recovering a dropped connection,
+which then reads as a frozen UI and a stalled video pipeline. None of this happens untethered.
+HaishinKit's maintainer has closed several identical freeze reports the same way (upstream
+issues #1574, #1722: reproducible only under Xcode). Install once, stop the debug session, and
+drive the app standalone.
+
 An iOS app that broadcasts the camera and the microphone to Twitch over RTMP.
 
 Two screens. The first collects an ingest address and a stream key and remembers them. The second
@@ -73,10 +82,17 @@ SwiftUI re-evaluated the view. That is precisely the leak the brief asks about.
 
 On `.background` the app stops publishing, closes the connection and releases the camera and the
 microphone. Coming back to the foreground leaves the user Offline with the camera off, ready to
-start again — nothing resumes behind their back.
+start again — nothing resumes behind their back. That covers the preview too: the task asks for
+camera activation only on an explicit action, and a return to the foreground is treated as a fresh
+screen rather than proof that the earlier tap still applies — one tap brings the preview back.
 
 Only `.background` counts. `.inactive` also fires while the system permission alert is on screen,
 and tearing the pipeline down there would fight the very thing the user was just asked to allow.
+
+A related situation is the system taking the camera away mid-session — a phone call, another app
+claiming capture. The session surfaces the capture interruption as an event, and the screen shows a
+notice saying the system paused the camera; when the interruption ends the notice removes itself.
+The broadcast state is not touched — it keeps describing the remote stream, not the local camera.
 
 Because nothing streams while the device is locked, the stream key is stored with
 `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — the strictest keychain class that still works, and
@@ -108,10 +124,18 @@ them disagree, both numbers are shown, the row is orange, and the summary line s
 honest version of "guarantee the stream matches the configured settings" — if the encoder ever does
 something else, the user sees it instead of being reassured.
 
-The frame rate is the one measured number in the sheet — it is what the camera delivered over the
-last second, not a setting read back. It is shown next to the configured value and never flagged,
-because a camera producing 29 of the 30 frames it was asked for is an ordinary healthy broadcast,
-not a misconfigured encoder.
+The frame rate and the data rate are the measured numbers in the sheet — what the camera delivered
+and what actually left the device over the last second, not settings read back. They are shown next
+to the configured values and never flagged, because a camera producing 29 of the 30 frames it was
+asked for is an ordinary healthy broadcast, not a misconfigured encoder.
+
+Those same two numbers are on the broadcast screen itself: while the stream is Online, a small
+capsule under the status panel shows the measured frame rate and outgoing data rate, refreshed every
+second. The data rate is the whole stream on the wire — audio and RTMP overhead included — which is
+why it reads a little above the configured 2.5 Mbps video bitrate rather than matching it. Nothing
+is shown there until the first measurement arrives, because the library's network monitor ticks once
+a second and starts at zero, and a HUD reading "0 fps · 0 kbit/s" under a live indicator would say
+the opposite of what is happening.
 
 ### The quality settings are a constant, and `validate()` is there anyway
 
@@ -133,6 +157,10 @@ worked example — the clock button on the broadcast screen turns it on, and it 
 
 The mechanism is `MediaMixer.screen`. Setting `videoMixerSettings.mode` to `.offscreen` makes the
 mixer compose each frame itself, and anything added as a child of that screen is drawn on top. The
+mode is entered once, at capture start: flipping it mid-flight rebuilds the video encoder and steps
+timestamps backward across clock domains, which interrupts both the preview and the outgoing stream
+for about a second — so the mixer composes for the whole life of a capture, and toggling the clock
+is a constant-time add or remove of one screen object. The
 composited frame is then what *every* output receives, so a single overlay lands in the encoded
 stream and in the on-screen preview at once — what the broadcaster sees is what the viewers see. A
 `MediaMixerOutput` cannot do this: an output only receives finished frames and cannot change them.
@@ -146,8 +174,8 @@ already has `ImageScreenObject` for the rendering side, so only the protocol bou
 
 The same two seams the overlay uses would carry most of what comes next. Local recording would be
 a `StreamRecorder` added as another mixer output, sitting next to the encoder rather than replacing
-it. Video filters would be a `VideoEffect` registered on the same offscreen-rendering switch the
-overlay already turns on, so they would compose with an overlay rather than compete with it. A
+it. Video filters would be a `VideoEffect` registered on the same offscreen rendering the capture
+already runs, so they would compose with an overlay rather than compete with it. A
 different wire protocol, such as SRT, would be another `StreamingSession` implementation behind the
 existing one, with everything above the seam — the state machine, the parameters sheet, the UI —
 unaware which one is running.
@@ -155,7 +183,14 @@ unaware which one is running.
 ### Reconnection
 
 A connection that drops on its own is re-established without asking: five attempts, 1, 2, 4, 8 and
-16 seconds apart. A failure that cannot succeed on a second try — a rejected stream key, a refused
+16 seconds apart. Those waits are for a network that is still away — once the device reports a path
+again, the wait that is running is dropped and so is every wait after it, for as long as the path
+stays up, so coming out of a lift or off airplane mode does not leave the user watching a backoff
+that has nothing left to wait for. Attempts against a live path either succeed or fail quickly, and
+if the path goes away again the waiting comes back with it. The waiting is the only thing
+reachability decides; whether the broadcast is back is still the server's answer. The one delay I cannot shorten is an attempt already in flight when the network
+returns: HaishinKit's connect timer is a hardcoded 15 seconds, so that is the worst case before the
+next attempt. A failure that cannot succeed on a second try — a rejected stream key, a refused
 broadcast — is not retried at all, because retrying only delays telling the user the truth. The
 duration keeps counting through a reconnection: it is the length of the broadcast, not the length of
 the current TCP connection.

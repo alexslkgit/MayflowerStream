@@ -7,29 +7,21 @@
 
 import Foundation
 
-/// A validated RTMP publish destination.
-///
-/// RTMP splits a destination in two: the client connects to an *application* on a server, then
-/// publishes under a *stream name*. Twitch's ingest URLs are handed out as one string,
-/// `rtmp://euw10.contribute.live-video.net/app/<stream key>`, where `app` is the application and
-/// the stream key is the stream name. Keeping the two apart in the model — instead of passing one
-/// string around and hoping the library splits it the same way we would — is what lets the
-/// configuration screen tell the user which half is wrong.
+// RTMP splits a destination in two: the client connects to an *application* on a server, then
+// publishes under a *stream name*. Twitch hands out both as one string
+// (rtmp://host/app/<stream key>), which is why they are kept apart here instead of relying on
+// the library to split them the same way.
 struct StreamEndpoint: Hashable, Sendable {
-    /// Everything up to and including the RTMP application, e.g. `rtmp://host/app`.
     let connectURL: String
-    /// The RTMP stream name. For Twitch, the stream key.
     let streamKey: String
 }
 
 extension StreamEndpoint {
-    /// Twitch's Irish ingest, the closest of its European ingests to Portugal.
-    /// Taken from Twitch's own ingest list, https://ingest.twitch.tv/ingests, on 2026-08-11.
+    // Twitch's Irish ingest, the closest of its European ingests to Portugal — see
+    // https://ingest.twitch.tv/ingests, checked 2026-08-11.
     static let twitchDefaultIngestURL = "rtmp://euw10.contribute.live-video.net/app"
 }
 
-/// Why a destination could not be built. Every case carries a message a non-technical user can act
-/// on; `StreamEndpointError` never reaches the screen in its raw form.
 enum StreamEndpointError: Error, Equatable {
     case ingestURLMissing
     case streamKeyMissing
@@ -67,11 +59,8 @@ extension StreamEndpointError: LocalizedError {
 }
 
 extension StreamEndpoint {
-    /// Two conveniences, because both are what people actually do with a Twitch key:
-    /// leading and trailing whitespace is stripped (stream keys are copied and pasted, and pick up
-    /// a trailing space often enough to be worth handling), and a full ingest URL pasted into the
-    /// address field with the key still on the end is split apart — but only when the key field is
-    /// empty, so a deliberately nested RTMP application path is never mangled.
+    // A pasted ingest URL with the key still on the end is split apart only when the key field
+    // is empty, so a deliberately nested RTMP application path is never mangled.
     static func make(ingestURL rawURL: String, streamKey rawKey: String) throws(StreamEndpointError) -> StreamEndpoint {
         let trimmedURL = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)

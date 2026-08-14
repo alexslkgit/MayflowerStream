@@ -6,12 +6,8 @@
 //
 
 import CoreGraphics
-import Foundation
 
-/// The settings the broadcast is asked to run with.
-///
-/// Codecs are not settings. The task fixes them at H.264 and AAC, so they are constants here and
-/// are reported to the user rather than chosen by them.
+/// Codecs are fixed at H.264/AAC, not user-chosen settings, so they are constants below.
 struct BroadcastConfiguration: Equatable, Sendable {
     var videoSize: CGSize
     /// Bits per second.
@@ -25,8 +21,7 @@ struct BroadcastConfiguration: Equatable, Sendable {
     static let videoCodec = "H.264"
     static let audioCodec = "AAC"
 
-    /// Comfortably inside every limit checked below, and a resolution every iPhone since the 6s
-    /// can produce from either camera.
+    /// Comfortably inside every limit below; every iPhone since the 6s can produce this from either camera.
     static let `default` = BroadcastConfiguration(
         videoSize: CGSize(width: 720, height: 1280),
         videoBitRate: 2_500_000,
@@ -38,9 +33,8 @@ struct BroadcastConfiguration: Equatable, Sendable {
 }
 
 extension BroadcastConfiguration {
-    /// Limits taken from Twitch's published broadcasting requirements, checked 2026-08-11.
-    /// They are the tightest of the services this app is likely to be pointed at, so validating
-    /// against them keeps the app from starting a broadcast the server will drop.
+    /// Twitch's published broadcasting requirements (checked 2026-08-11) — the tightest of the
+    /// services this app targets, so validating against them keeps the server from dropping the broadcast.
     enum Limits {
         static let videoBitRate = 500_000...6_000_000
         static let audioBitRate = 64_000...160_000
@@ -50,12 +44,8 @@ extension BroadcastConfiguration {
         static let longestSide = 1920.0
     }
 
-    /// Checked before anything is opened, so an impossible configuration is refused with a reason
-    /// instead of failing somewhere inside the encoder.
-    ///
-    /// This covers what can be known without hardware. Whether *this particular device* can
-    /// actually produce the requested size from the requested camera is a different question, and
-    /// is answered by the capture session when it starts.
+    /// Checked before anything is opened. Whether this device can actually produce the requested
+    /// size from the requested camera is a separate question, answered by the capture session at start.
     func validate() throws(BroadcastFailure) {
         let width = videoSize.width
         let height = videoSize.height

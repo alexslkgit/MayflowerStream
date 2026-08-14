@@ -5,22 +5,15 @@
 //  Created by Slobodianiuk Oleksandr on 11.08.2026.
 //
 
-import Foundation
-
-/// What the user is told the broadcast is doing.
-///
-/// The requirement behind this type is "never let users remain uncertain about whether their
-/// stream is active", so the states are deliberately about the *remote* stream, not about the
-/// local camera. A running preview with no connection is `.offline`, and the screen says so.
+/// States describe the *remote* stream, not the local camera: a running preview with no
+/// connection is `.offline`.
 enum BroadcastState: Equatable, Sendable {
-    /// Not broadcasting. The camera may or may not be running; that is a separate question.
     case offline
     /// On the user's request, unlike `.reconnecting`.
     case connecting
-    /// The server has accepted the publish request. Nothing here confirms frames are still
-    /// arriving — that would need sampling the outgoing bitrate, which this state does not do.
+    /// Server accepted the publish request; does not confirm frames are still arriving.
     case online
-    /// The stream dropped on its own and is being re-established without the user asking.
+    /// Dropped on its own and being re-established without the user asking.
     case reconnecting(attempt: Int)
     case failed(BroadcastFailure)
 }

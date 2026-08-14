@@ -7,12 +7,6 @@
 
 import Foundation
 
-/// Screen 2's brain: it owns the broadcast state machine, the duration, and the translation of
-/// everything that goes wrong into something the screen can say.
-///
-/// Two things are kept strictly apart here. `isCapturing` is about the local camera. `state` is
-/// about the remote stream. A running preview with a dead connection is `.offline`, and the panel
-/// says Offline.
 @MainActor
 @Observable
 final class BroadcastController {
@@ -20,22 +14,15 @@ final class BroadcastController {
     // MARK: - What the screen reads
 
     private(set) var state: BroadcastState = .offline
-    /// True once the camera and microphone are open. Nothing opens them but `startCapture()`.
     private(set) var isCapturing = false
     private(set) var isMicrophoneMuted = false
     private(set) var isClockOverlayVisible = false
-    /// Read out of the configuration rather than kept beside it: a second copy of the same fact is
-    /// one forgotten write site away from disagreeing with the first, and the disagreement shows up
-    /// as a button that switches to the camera the user is already on. `configuration` is stored on
-    /// this `@Observable` class, so the screen still sees this change when the camera is switched.
     var cameraFacing: CameraFacing { configuration.cameraFacing }
-    /// Seconds since the broadcast first went live. Keeps counting through a reconnection, because
-    /// it is the length of the broadcast, not the length of the current TCP connection.
     private(set) var elapsedSeconds: Int = 0
+    /// Whole seconds left of the current backoff wait; nil while an attempt is actually in flight.
+    private(set) var secondsUntilNextAttempt: Int?
     private(set) var statistics: StreamStatistics?
-    /// Something went wrong that has nothing to do with whether the stream is live — a camera that
-    /// refused to switch, say. It gets its own card on screen and leaves `state` alone: writing it
-    /// into `state` would tell a user whose broadcast is still going out that it had stopped.
+    /// Local capture failures only; `state` covers the remote stream and is never overwritten here.
     private(set) var notice: BroadcastFailure?
 
     // MARK: - Collaborators
@@ -44,24 +31,30 @@ final class BroadcastController {
     private let permissions: any MediaPermissions
     private let endpoint: StreamEndpoint
     private let reconnectPolicy: ReconnectPolicy
+    private let connectivity: any ConnectivityMonitor
+    private let countdownTick: Duration
+    private let pathSettleDelay: Duration
     private var configuration: BroadcastConfiguration
 
     private var eventTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
+    private var countdownTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var connectivityTask: Task<Void, Never>?
+    /// `stopBroadcast()` goes offline before this runs; every caller awaits it so two handshakes
+    /// never race on one RTMP connection.
+    private var teardownTask: Task<Void, Never>?
+    private var backoffWait: Task<Void, Never>?
+    /// True once the connectivity monitor sees the path return during this reconnection; skips the
+    /// remaining backoff. Cleared on the next loss, so a flapping path must return again to skip.
+    private var isPathBackAfterLoss = false
+    /// One settle is owed per return of the path; cleared as it is taken, so the skip stays a skip.
+    private var isPathSettleOwed = false
     private var startedAt: Date?
-    /// Set before the first await in `startCapture()`, so that a second tap arriving while the
-    /// camera is still opening is turned away. `isCapturing` cannot do that job: it only becomes
-    /// true after the awaits, which is exactly the window a double tap falls into.
     private var isStartingCapture = false
     private var isTogglingMicrophone = false
-    /// Same job for the camera button. Two switches in flight at once race each other over one
-    /// capture session, and the second one reads a `cameraFacing` the first is about to change —
-    /// so a fast double tap decides to switch to the camera it is already switching to.
     private var isSwitchingCamera = false
-    /// Bumped every time the user stops. Anything that was in flight across that moment belongs to
-    /// an older broadcast and its result is discarded, so a publish the user has already cancelled
-    /// cannot put them back on air.
+    /// Bumped on every stop; anything in flight from an older generation is discarded on completion.
     private var broadcastGeneration = 0
 
     init(
@@ -69,49 +62,43 @@ final class BroadcastController {
         session: any StreamingSession,
         permissions: any MediaPermissions = SystemMediaPermissions(),
         configuration: BroadcastConfiguration = .default,
-        reconnectPolicy: ReconnectPolicy = .default
+        reconnectPolicy: ReconnectPolicy = .default,
+        connectivity: any ConnectivityMonitor = NetworkPathMonitor(),
+        countdownTick: Duration = .seconds(1),
+        pathSettleDelay: Duration = .milliseconds(750)
     ) {
         self.endpoint = endpoint
         self.session = session
         self.permissions = permissions
         self.configuration = configuration
         self.reconnectPolicy = reconnectPolicy
+        self.connectivity = connectivity
+        self.countdownTick = countdownTick
+        self.pathSettleDelay = pathSettleDelay
         listenForEvents()
     }
 
     // MARK: - Capture
 
-    /// Called from an explicit tap and from nowhere else — in particular, never from `onAppear`.
+    /// Called from an explicit tap only, never from `onAppear`.
     func startCapture() async {
         guard !isCapturing, !isStartingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
-        // Read before the first await, the same discipline `startBroadcast()` uses one level down.
-        // `shutDown()` and `stopBroadcast()` both move it, and a `shutDown()` landing at any of the
-        // awaits below has already closed the camera this call is opening: the session tears down
-        // its own half and returns normally, so nothing here throws and this counter is the only
-        // thing that says the result is no longer wanted. Every write below is skipped once it has
-        // moved — the permission failures included, because a user who left the screen is owed the
-        // Offline the shutdown left behind rather than an error card about a camera nobody is
-        // looking at any more.
+        // Captured before the first await so a `shutDown()` landing mid-call is detected below.
         let generation = broadcastGeneration
 
-        guard await permissions.requestAccess(to: .camera) == .granted else {
-            if generation == broadcastGeneration { state = .failed(.cameraAccessDenied) }
+        if let failure = await permissions.requestAccess(to: .camera).failure(for: .camera) {
+            if generation == broadcastGeneration { state = .failed(failure) }
             return
         }
-        // Audio is not optional: the broadcast is required to carry an AAC track, so a refusal
-        // here has to stop the preview rather than quietly produce a silent stream later.
-        guard await permissions.requestAccess(to: .microphone) == .granted else {
-            if generation == broadcastGeneration { state = .failed(.microphoneAccessDenied) }
+        if let failure = await permissions.requestAccess(to: .microphone).failure(for: .microphone) {
+            if generation == broadcastGeneration { state = .failed(failure) }
             return
         }
 
         do {
             try await session.startCapture(configuration)
-            // Nothing is left running to take down here — the session did that itself — so what is
-            // left to get wrong is `isCapturing`: setting it now draws a preview and a full set of
-            // controls over a pipeline that no longer exists.
             guard generation == broadcastGeneration else { return }
             isCapturing = true
             isMicrophoneMuted = false
@@ -133,8 +120,6 @@ final class BroadcastController {
             configuration.cameraFacing = target
             notice = nil
         } catch {
-            // A missing camera is a normal thing to run into, not a reason to end the broadcast.
-            // The broadcast state is left exactly as it was — it is still true.
             notice = error
         }
     }
@@ -148,9 +133,6 @@ final class BroadcastController {
         await session.setOverlay(isClockOverlayVisible ? ClockOverlay() : nil)
     }
 
-    /// The flag the icon is drawn from is set from what the session reports it applied, never from
-    /// what was asked for — and a second tap arriving mid-flight is turned away rather than
-    /// computed from a value that is about to change.
     func toggleMicrophone() async {
         guard isCapturing, !isTogglingMicrophone else { return }
         isTogglingMicrophone = true
@@ -173,16 +155,13 @@ final class BroadcastController {
 
         state = .connecting
         let generation = broadcastGeneration
+        await waitForTeardown()
+        guard generation == broadcastGeneration else { return }
         do {
             try await session.startPublishing(to: endpoint)
-            // This call returns only once the server has answered "publish started", so the
-            // return *is* the confirmation. The `.publishing` event says the same thing and can
-            // arrive first, setting `.online` before this line runs — that is still this broadcast
-            // succeeding, not somebody else's decision, and `goOnline()` is idempotent.
+            // `.publishing` can arrive first and set `.online` before this returns; both are this
+            // broadcast succeeding, and `goOnline()` is idempotent.
             guard generation == broadcastGeneration, state == .connecting || state == .online else {
-                // Either the user stopped while this was in flight, or a drop reported before the
-                // server answered has already decided the state. The server is publishing a
-                // broadcast nobody is waiting for, so take it down again.
                 await session.stopPublishing()
                 return
             }
@@ -193,17 +172,33 @@ final class BroadcastController {
         }
     }
 
+    /// Every write happens before the first await; the goodbye itself is not something the screen
+    /// waits for.
     func stopBroadcast() async {
         broadcastGeneration += 1
         cancelReconnection()
-        await session.stopPublishing()
         stopTimer()
         statistics = nil
         state = .offline
+
+        beginTeardown()
+        await waitForTeardown()
     }
 
-    /// What failed decides what is tried again. Whether the camera happens to be running does not:
-    /// branching on that is how "Try again" under a camera error ends up putting the user on air.
+    private func beginTeardown() {
+        guard teardownTask == nil else { return }
+        teardownTask = Task { [weak self] in
+            guard let self else { return }
+            await session.stopPublishing()
+            teardownTask = nil
+        }
+    }
+
+    private func waitForTeardown() async {
+        guard let teardownTask else { return }
+        await teardownTask.value
+    }
+
     func retry() async {
         guard let failure = state.failure else { return }
         state = .offline
@@ -214,31 +209,32 @@ final class BroadcastController {
         }
     }
 
-    /// Used when the screen goes away and when the app is backgrounded.
-    ///
-    /// The event reader is deliberately left running: cancelling the consumer of an `AsyncStream`
-    /// finishes that stream for good, and a reader started afterwards would receive nothing — the
-    /// next broadcast would publish frames while the screen still said Connecting.
+    /// The event reader is left running: cancelling an `AsyncStream` reader ends it for good, and a
+    /// reader started for the next broadcast would receive nothing.
     func shutDown() async {
         broadcastGeneration += 1
         cancelReconnection()
         stopTimer()
+        await waitForTeardown()
         await session.stopPublishing()
         await session.stopCapture()
         isCapturing = false
         statistics = nil
         state = .offline
+        notice = nil
+        isClockOverlayVisible = false
+        await session.setOverlay(nil)
     }
 
     func refreshStatistics() async {
-        statistics = await session.currentStatistics()
+        let generation = broadcastGeneration
+        let measured = await session.currentStatistics()
+        guard generation == broadcastGeneration else { return }
+        statistics = measured
     }
 
     // MARK: - Events
 
-    /// Started once, from `init`, and never stopped. See `StreamingSession.events` for why there
-    /// can only ever be one reader, and `shutDown()` for why it outlives a background cycle.
-    /// The stream itself is captured rather than the session, so this task holds nothing alive.
     private func listenForEvents() {
         guard eventTask == nil else { return }
         let events = session.events
@@ -253,28 +249,34 @@ final class BroadcastController {
     private func handle(_ event: StreamingEvent) async {
         switch event {
         case .publishing:
-            // Only meaningful while the app is trying to be, or believes it is, on air. After an
-            // explicit stop this is the server confirming a broadcast the user already cancelled.
             guard state.isLive || state.isBusy else { return }
             await goOnline()
 
         case .disconnected(let failure):
             guard state.isLive || state.isBusy else { return }
-            if failure.isWorthRetrying {
+            // A refusal reported while a reconnection is already running is the network, not the
+            // key: the key was accepted when this broadcast went Online. A revoked one is refused
+            // again on the next manual start, where it is reported as itself.
+            if failure.isWorthRetrying || reconnectTask != nil {
                 beginReconnecting()
             } else {
                 stopTimer()
                 statistics = nil
                 state = .failed(failure)
             }
+
+        case .captureInterrupted:
+            notice = .captureInterrupted
+
+        case .captureResumed:
+            if notice == .captureInterrupted { notice = nil }
         }
     }
 
     // MARK: - Reconnection
 
-    /// The one place `state` becomes `.online`, reached both from a successful publish and from
-    /// the server's `.publishing` event. Idempotent, because both can happen for the same
-    /// broadcast, and because a reconnection ends the same way an initial connection does.
+    /// The only place `state` becomes `.online`; idempotent since a successful publish and the
+    /// server's `.publishing` event can both call it for the same broadcast.
     private func goOnline() async {
         cancelReconnection()
         if startedAt == nil { startedAt = Date() }
@@ -285,64 +287,133 @@ final class BroadcastController {
 
     private func beginReconnecting() {
         guard reconnectTask == nil else { return }
+        startWatchingConnectivity()
         reconnectTask = Task { [weak self] in
             guard let self else { return }
             let generation = broadcastGeneration
             for attempt in 1...reconnectPolicy.maximumAttempts {
                 state = .reconnecting(attempt: attempt)
-                try? await Task.sleep(for: reconnectPolicy.delay(attempt))
-                // Cancellation may be read here only because this check can do nothing but return:
-                // nothing has been published yet, so there is nothing that could be left behind.
+                await waitBeforeAttempt(reconnectPolicy.delay(attempt))
                 if Task.isCancelled || generation != broadcastGeneration { return }
 
                 do {
                     try await session.startPublishing(to: endpoint)
-                    // What happens now is decided from the generation and the state, never from
-                    // `Task.isCancelled`. The server's `.publishing` event routinely arrives before
-                    // this call returns, and the `goOnline()` it triggers cancels this very task —
-                    // so cancellation here usually means the reconnection *worked*, and stopping on
-                    // it would tear down the connection that was just re-established. A user who
-                    // stopped is visible in the generation, which is what `stopBroadcast()` and
-                    // `shutDown()` bump.
+                    // Decided from generation/state, not `Task.isCancelled`: the `.publishing` event
+                    // routinely fires first and its `goOnline()` cancels this task on success.
                     guard generation == broadcastGeneration else {
-                        // Stopped while this was in flight. The server is publishing a broadcast
-                        // nobody is waiting for, so take it down again.
                         await session.stopPublishing()
                         return
                     }
-                    // The event won the race and `goOnline()` has already put this broadcast back
-                    // on air. Nothing left to do, and nothing to take down.
                     if state == .online { return }
                     guard state == .reconnecting(attempt: attempt) else {
-                        // A drop not worth retrying was reported while this was in flight and has
-                        // already ended the broadcast. What the server just accepted belongs to
-                        // nobody, so take it down rather than leave it publishing behind an error.
                         await session.stopPublishing()
                         reconnectTask = nil
+                        stopWatchingConnectivity()
                         return
                     }
-                    // `goOnline()` clears `reconnectTask`, and that is what lets the *next* drop
-                    // start its own reconnection. Leaving it set is what turns one lost connection
-                    // into a permanent "Reconnecting (1)".
                     await goOnline()
                     return
                 } catch {
-                    // Return-only as well, so cancellation is safe to read here: the attempt threw,
-                    // and a `startPublishing` that throws leaves nothing open behind it.
                     if Task.isCancelled || generation != broadcastGeneration { return }
                     continue
                 }
             }
             reconnectTask = nil
+            stopWatchingConnectivity()
             stopTimer()
             statistics = nil
             state = .failed(.reconnectionGaveUp(attempts: reconnectPolicy.maximumAttempts))
         }
     }
 
+    private func waitBeforeAttempt(_ delay: Duration) async {
+        if isPathBackAfterLoss {
+            await settleAfterRestore()
+            return
+        }
+        let wait = Task { () async -> Void in
+            try? await Task.sleep(for: delay)
+        }
+        backoffWait = wait
+        startCountdown(over: delay)
+        await withTaskCancellationHandler {
+            await wait.value
+        } onCancel: {
+            wait.cancel()
+        }
+        stopCountdown()
+        backoffWait = nil
+        // The wait above may have been cut short by the same return of the path.
+        await settleAfterRestore()
+    }
+
+    /// A path the system reports as satisfied is not yet one that carries a connection — Wi-Fi is
+    /// still associating, DNS is not answering — and an attempt fired on that edge fails in under a
+    /// second for a reason that is not the server's. Bounded and taken once per return of the path,
+    /// so the backoff the skip removed does not come back.
+    private func settleAfterRestore() async {
+        guard isPathSettleOwed else { return }
+        isPathSettleOwed = false
+        try? await Task.sleep(for: pathSettleDelay)
+    }
+
+    /// Counts alongside the wait instead of driving it, so a skipped backoff is still the one
+    /// cancellation the loop knows about. Sub-second waits show nothing rather than flashing "0s".
+    private func startCountdown(over delay: Duration) {
+        let seconds = Int(delay.components.seconds)
+        guard seconds > 0 else { return }
+        secondsUntilNextAttempt = seconds
+        countdownTask = Task { [weak self] in
+            while let self, let remaining = secondsUntilNextAttempt, remaining > 1 {
+                try? await Task.sleep(for: countdownTick)
+                guard !Task.isCancelled else { return }
+                secondsUntilNextAttempt = remaining - 1
+            }
+        }
+    }
+
+    private func stopCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        secondsUntilNextAttempt = nil
+    }
+
+    /// Runs only for the lifetime of a reconnection. A satisfied update counts as "back" only after
+    /// an unsatisfied one was seen in this reconnection, and a fresh loss re-arms that edge.
+    private func startWatchingConnectivity() {
+        guard connectivityTask == nil else { return }
+        connectivityTask = Task { [weak self] in
+            guard let updates = await self?.connectivity.updates() else { return }
+            var pathWasLost = false
+            for await isSatisfied in updates {
+                guard let self else { return }
+                guard isSatisfied else {
+                    pathWasLost = true
+                    isPathBackAfterLoss = false
+                    isPathSettleOwed = false
+                    continue
+                }
+                guard pathWasLost else { continue }
+                pathWasLost = false
+                isPathBackAfterLoss = true
+                isPathSettleOwed = true
+                backoffWait?.cancel()
+            }
+        }
+    }
+
+    private func stopWatchingConnectivity() {
+        connectivityTask?.cancel()
+        connectivityTask = nil
+        isPathBackAfterLoss = false
+        isPathSettleOwed = false
+    }
+
     private func cancelReconnection() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        stopCountdown()
+        stopWatchingConnectivity()
     }
 
     // MARK: - Duration
@@ -377,8 +448,6 @@ extension BroadcastController {
         Self.formatDuration(seconds: elapsedSeconds)
     }
 
-    /// A broadcaster reads the minutes, so they keep their two digits and the hours only appear
-    /// once there are any.
     static func formatDuration(seconds elapsed: Int) -> String {
         let hours = elapsed / 3600
         let minutes = (elapsed % 3600) / 60

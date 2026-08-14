@@ -7,11 +7,18 @@
 
 import SwiftUI
 
-/// Screen 1 — Stream Configuration.
-///
-/// Nothing here touches the camera, the microphone or the network. The screen exists only to
-/// collect and persist a destination; capture starts on screen 2, and only when the user asks for
-/// it.
+private enum Strings {
+    static let navigationTitle = "Stream setup"
+    static let ingestPlaceholder = "rtmp://…"
+    static let serverHeader = "Server"
+    static let serverFooter = "Twitch lists its ingest servers at ingest.twitch.tv. The one filled in is the closest European server."
+    static let streamKeyPlaceholder = "live_…"
+    static let showStreamKey = "Show stream key"
+    static let streamKeyHeader = "Stream key"
+    static let streamKeyFooter = "On Twitch: Creator Dashboard → Settings → Stream. The key is stored in this device's keychain, not in plain text."
+    static let saveAndContinue = "Save and continue"
+}
+
 struct StreamConfigurationView: View {
     @State private var model: StreamConfigurationModel
     @State private var isKeyVisible = false
@@ -27,7 +34,7 @@ struct StreamConfigurationView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("rtmp://…", text: $model.ingestURL)
+                    TextField(Strings.ingestPlaceholder, text: $model.ingestURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
@@ -35,18 +42,18 @@ struct StreamConfigurationView: View {
                         .submitLabel(.next)
                         .onSubmit { focusedField = .streamKey }
                 } header: {
-                    Text("Server")
+                    Text(Strings.serverHeader)
                 } footer: {
-                    Text("Twitch lists its ingest servers at ingest.twitch.tv. The one filled in is the closest European server.")
+                    Text(Strings.serverFooter)
                 }
 
                 Section {
                     streamKeyField
-                    Toggle("Show stream key", isOn: $isKeyVisible)
+                    Toggle(Strings.showStreamKey, isOn: $isKeyVisible)
                 } header: {
-                    Text("Stream key")
+                    Text(Strings.streamKeyHeader)
                 } footer: {
-                    Text("On Twitch: Creator Dashboard → Settings → Stream. The key is stored in this device's keychain, not in plain text.")
+                    Text(Strings.streamKeyFooter)
                 }
 
                 if let problem = model.problem {
@@ -56,14 +63,14 @@ struct StreamConfigurationView: View {
                 }
 
                 Section {
-                    Button("Save and continue") {
+                    Button(Strings.saveAndContinue) {
                         focusedField = nil
                         model.saveAndContinue()
                     }
                     .disabled(!model.canContinue)
                 }
             }
-            .navigationTitle("Stream setup")
+            .navigationTitle(Strings.navigationTitle)
             .onChange(of: model.ingestURL) { model.entryChanged() }
             .onChange(of: model.streamKey) { model.entryChanged() }
             .navigationDestination(item: $model.endpoint) { endpoint in
@@ -75,18 +82,17 @@ struct StreamConfigurationView: View {
     @ViewBuilder
     private var streamKeyField: some View {
         if isKeyVisible {
-            TextField("live_…", text: $model.streamKey)
+            TextField(Strings.streamKeyPlaceholder, text: $model.streamKey)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .focused($focusedField, equals: .streamKey)
                 .submitLabel(.done)
                 .onSubmit(submitFromStreamKeyField)
         } else {
-            SecureField("live_…", text: $model.streamKey)
+            SecureField(Strings.streamKeyPlaceholder, text: $model.streamKey)
                 .textInputAutocapitalization(.never)
-                // A stream key is not an account password. Without this, iOS offers to save it to
-                // the user's passwords the moment the screen is left, which is both confusing and
-                // pointless — the app already keeps it in the keychain itself.
+                // Not an account password: without this, iOS offers to save it to the user's
+                // passwords, which is pointless since the app already keeps it in the keychain.
                 .textContentType(.oneTimeCode)
                 .focused($focusedField, equals: .streamKey)
                 .submitLabel(.done)

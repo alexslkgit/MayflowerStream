@@ -89,7 +89,7 @@ struct StreamConfigurationModelTests {
     @Test("A failed save is reported, and nothing on the screen wipes the message")
     func failedSaveKeepsItsMessage() {
         let store = InMemoryStreamSettingsStore()
-        store.saveFailure = KeychainError(status: -25299)
+        store.saveFailure = KeychainError()
         let model = StreamConfigurationModel(store: store)
         model.ingestURL = Self.validURL + "/live_123"
         model.streamKey = ""
@@ -98,8 +98,7 @@ struct StreamConfigurationModelTests {
 
         #expect(model.problem?.message == "Your stream key could not be saved to this device.")
         #expect(model.endpoint == nil, "a broadcast must not start from settings that were not saved")
-        // The screen clears the message whenever these fields change. If saving rewrote them with
-        // the normalised values, the message would be gone before the user could read it.
+        // The screen clears the message whenever these fields change; if saving normalised them, the message would vanish before the user could read it.
         #expect(model.ingestURL == Self.validURL + "/live_123")
         #expect(model.streamKey == "")
     }

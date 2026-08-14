@@ -14,8 +14,9 @@ import Testing
 struct BroadcastFailureTests {
 
     private static let all: [BroadcastFailure] = [
-        .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing(.front), .cameraMissing(.back),
-        .cameraUnavailable, .microphoneUnavailable, .audioSessionUnavailable,
+        .cameraAccessDenied, .microphoneAccessDenied, .cameraAccessRestricted,
+        .microphoneAccessRestricted, .cameraMissing(.front), .cameraMissing(.back),
+        .cameraUnavailable, .microphoneUnavailable, .audioSessionUnavailable, .captureInterrupted,
         .unsupportedConfiguration(reason: "The frame rate is too high."), .encoderConfigurationFailed,
         .serverUnreachable, .connectionTimedOut, .streamKeyRejected, .serverRefused,
         .connectionLost, .reconnectionGaveUp(attempts: 5), .unexpected(detail: "-12345"),
@@ -49,8 +50,7 @@ struct BroadcastFailureTests {
         )
     }
 
-    /// The other retry question, and a different one: `isWorthRetrying` decides what the app does
-    /// on its own, this decides whether the user is offered a button at all.
+    /// Unlike `isWorthRetrying`, which decides what the app does on its own, this decides whether the user is offered a button at all.
     @Test("A failure the user cannot do anything about is offered no Try again")
     func offersTryAgainOnlyWhereItCouldHelp() {
         #expect(
@@ -67,17 +67,48 @@ struct BroadcastFailureTests {
         }
     }
 
-    /// Adding a case to `BroadcastFailure` stops this file compiling until the new case is named
-    /// here, and the count below then fails until it is added to `all` — which is what stops a new
-    /// failure from quietly arriving with no message, no recovery text and no test.
+    /// A restriction is not a refusal: the user never made the choice and cannot unmake it, so the text must not send them to a switch that is not there.
+    @Test("Access blocked by a restriction is not described as a refusal the user can lift")
+    func aRestrictionIsNotDescribedAsARefusal() {
+        for failure: BroadcastFailure in [.cameraAccessRestricted, .microphoneAccessRestricted] {
+            #expect(failure.isUserRetryable == false, "\(failure) offers a retry that cannot work")
+            #expect(failure.isWorthRetrying == false)
+            #expect(failure.isDeviceProblem, "\(failure) is about this device, not about the stream")
+            let recovery = failure.recovery ?? ""
+            #expect(
+                !recovery.contains("Settings"),
+                "\(failure) points at a Settings switch that a restricted device does not show"
+            )
+            #expect(recovery.contains("Screen Time"), "\(failure) never says what is actually blocking it")
+        }
+        #expect(BroadcastFailure.cameraAccessRestricted.message != BroadcastFailure.cameraAccessDenied.message)
+    }
+
+    /// Unlike `isUserRetryable`, which says a button is worth offering, this says it cannot be "Try again" because the same configuration would be sent again.
+    @Test("Only a rejected stream key sends the user back to the setup screen")
+    func onlyARejectedKeyNeedsReconfiguration() {
+        #expect(BroadcastFailure.streamKeyRejected.requiresReconfiguration)
+
+        for failure in Self.all where failure != .streamKeyRejected {
+            #expect(
+                failure.requiresReconfiguration == false,
+                "\(failure) sends the user to the setup screen with nothing there to change"
+            )
+        }
+    }
+
+    /// Adding a case to `BroadcastFailure` stops this file compiling until it is named here, and the count below fails until it is added to `all`, catching a case with no message or test.
     private static func name(of failure: BroadcastFailure) -> String {
         switch failure {
         case .cameraAccessDenied: "cameraAccessDenied"
         case .microphoneAccessDenied: "microphoneAccessDenied"
+        case .cameraAccessRestricted: "cameraAccessRestricted"
+        case .microphoneAccessRestricted: "microphoneAccessRestricted"
         case .cameraMissing: "cameraMissing"
         case .cameraUnavailable: "cameraUnavailable"
         case .microphoneUnavailable: "microphoneUnavailable"
         case .audioSessionUnavailable: "audioSessionUnavailable"
+        case .captureInterrupted: "captureInterrupted"
         case .unsupportedConfiguration: "unsupportedConfiguration"
         case .encoderConfigurationFailed: "encoderConfigurationFailed"
         case .serverUnreachable: "serverUnreachable"
@@ -94,7 +125,7 @@ struct BroadcastFailureTests {
     func everyCaseIsCovered() {
         let covered = Set(Self.all.map(Self.name(of:)))
         #expect(
-            covered.count == 15,
+            covered.count == 18,
             "a case was added to BroadcastFailure but not to the list this suite checks"
         )
     }

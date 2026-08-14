@@ -11,42 +11,14 @@ import OSLog
 import RTMPHaishinKit
 import VideoToolbox
 
-/// The real streaming session: HaishinKit 2.2.5 behind `StreamingSession`.
-///
-/// Everything the library exposes is actor-isolated, which is why this type is an actor too — it
-/// is the only place in the app that has to `await` its way through a media pipeline, and keeping
-/// that inside one file is most of the reason the protocol exists.
-///
-/// **Nothing is built until `startCapture`.** Creating this object allocates an event stream and
-/// nothing else. `RTMPStream.init` starts a task that registers itself with its connection, so
-/// building the pipeline when the screen appears would leave live objects behind every time
-/// SwiftUI re-evaluated the view, and would open the media stack without the user having asked for
-/// it. The pipeline is created on the explicit tap and destroyed on `stopCapture`.
-///
-/// The pipeline is: `MediaMixer` owns the camera and the microphone, `RTMPStream` is registered as
-/// one of the mixer's outputs and encodes what the mixer produces, and `RTMPConnection` carries it
-/// to the server. The preview view is registered as an output of the *mixer*, not of the stream,
-/// so it shows what the camera sees whether or not anything is being published. That is why a
-/// preview can be live while the status panel says Offline.
-///
-/// **Where a visual overlay goes.** Not through `MediaMixerOutput` — an output only receives
-/// finished frames and cannot change them. The mixer's own compositor is `MediaMixer.screen`:
-/// switching `videoMixerSettings.mode` to `.offscreen` makes it draw the camera track into a
-/// `Screen` first, and anything else added as a child of that screen is drawn on top. Because the
-/// composited frame is what every output then receives, one overlay lands in the encoded stream
-/// and in the preview at once. `setOverlay(_:)` below is that, and `ClockOverlay` is a worked
-/// example of it.
 actor HaishinKitStreamingSession: StreamingSession {
 
     nonisolated let events: AsyncStream<StreamingEvent>
     private nonisolated let continuation: AsyncStream<StreamingEvent>.Continuation
 
-    /// The user is told a sentence; this is where the raw reason goes, so a failure on a phone
-    /// without that camera can be read back out of the device log instead of guessed at.
     private static let log = Logger(subsystem: "com.slobodianiuk.MayflowerStream", category: "broadcast")
     private static let rtmpLog = Logger(subsystem: "com.slobodianiuk.MayflowerStream", category: "rtmp")
 
-    /// The media stack. Nil until the user starts the camera, and nil again after they stop it.
     private struct Pipeline {
         let mixer: MediaMixer
         let connection: RTMPConnection
@@ -57,41 +29,29 @@ actor HaishinKitStreamingSession: StreamingSession {
     private var statusTasks: [Task<Void, Never>] = []
     private var configuration: BroadcastConfiguration = .default
 
-    /// An actor releases its isolation at every `await`, so `pipeline == nil` stops being true
-    /// long before `pipeline` is assigned. This flag is set before the first await and is what
-    /// actually makes building the pipeline twice impossible.
+    /// Set before the first await in `startCapture`: an actor drops isolation at every await, so
+    /// `pipeline == nil` alone would let a second call in while the pipeline is still building.
     private var isStartingCapture = false
 
-    /// Bumped every time the camera is stopped, including when there was nothing to stop. A
-    /// `startCapture` still working its way through the device attaches has published no pipeline
-    /// for `stopCapture` to find, so this counter is the only trace such a stop can leave for it —
-    /// and the start compares it against what it read on entry before keeping anything it built.
+    /// Bumped on every stop. `startCapture` reads it on entry and tears down what it built if the
+    /// value has since changed — the only way a stop that lands mid-build is noticed.
     private(set) var captureGeneration = 0
 
-    /// The overlay survives a stop/start cycle, so turning the clock on and then restarting the
-    /// camera does not silently lose it.
+    /// Survives a stop/start cycle; only `BroadcastController.shutDown()` clears it.
     private var overlay: (any StreamOverlay)?
     private var overlayCaption: TextScreenObject?
     private var overlayTask: Task<Void, Never>?
 
-    /// Preview views SwiftUI has created. A view that arrives before capture starts is remembered
-    /// until there is a mixer to attach it to; the list is emptied again by `stopCapture`, because
-    /// SwiftUI destroys those views along with the preview and builds new ones next time.
     private var previewViews: [MTHKView] = []
 
-    /// Whether a drop should be reported. Closing the connection ourselves produces the same RTMP
-    /// status codes as the server hanging up, and the user must not be told a broadcast failed
-    /// when they are the one who ended it.
+    /// Gates `report(_:)` below so a self-initiated close (same RTMP codes as the server hanging
+    /// up) is not reported to the user as a failure.
     private var isPublishing = false
 
-    /// True from the moment `publish()` is sent until the server answers `.publishStart`. Twitch
-    /// refuses a bad stream key by hanging up inside exactly this window — it never sends
-    /// `NetStream.Publish.BadName` — so a close seen here means something quite different from a
-    /// close seen once the broadcast is up.
+    /// True between `publish()` and `.publishStart`. Twitch refuses a bad stream key by hanging up
+    /// inside this window rather than sending `NetStream.Publish.BadName`.
     private var isPublishHandshakeInFlight = false
 
-    /// Whether such a close was seen. `publish()` itself only ever reports that nothing answered
-    /// it in time, so this is what tells a refused key apart from a silent server afterwards.
     private var didCloseDuringPublishHandshake = false
 
     init() {
@@ -100,13 +60,19 @@ actor HaishinKitStreamingSession: StreamingSession {
         continuation = escaped
     }
 
+    /// `events` is read by a task that is never cancelled (see README), so `finish()` here is what
+    /// stops it from hanging suspended for the rest of the process once this session is gone.
+    deinit {
+        continuation.finish()
+    }
+
     // MARK: - Capture
 
     func startCapture(_ configuration: BroadcastConfiguration) async throws(BroadcastFailure) {
         guard pipeline == nil, !isStartingCapture else { return }
         isStartingCapture = true
         defer { isStartingCapture = false }
-        // Read before the first await, so that a stop arriving at any of them is visible at the end.
+        // Read before the first await, so a stop arriving during any of them is visible at the end.
         let generation = captureGeneration
         self.configuration = configuration
 
@@ -124,10 +90,6 @@ actor HaishinKitStreamingSession: StreamingSession {
             stream: RTMPStream(connection: connection)
         )
 
-        // Leave nothing half-built behind: whichever step failed, the whole pipeline is dropped
-        // through the same teardown a successful capture ends with. Each step reports its own
-        // reason, because "the camera could not be started" is a lie when it was the microphone,
-        // the audio session or the encoder that refused.
         do {
             try Self.activateAudioSession()
         } catch {
@@ -162,6 +124,19 @@ actor HaishinKitStreamingSession: StreamingSession {
             throw .encoderConfigurationFailed
         }
 
+        // Enter .offscreen once, here, before startRunning(): a later mode flip rebuilds
+        // VideoToolbox (32ARGB offscreen pool vs 420v camera output) and breaks PTS continuity.
+        // Must precede startRunning() — the mixer only applies a stored mode as it starts — and
+        // the screen size below must too, or the first frames go out at the library's default
+        // 1280x720 and force the same rebuild. `setFrameRate` above must stay in front of the
+        // mode in turn: it only reaches the camera device while the mixer is still in passthrough.
+        var videoSettings = await pipeline.mixer.videoMixerSettings
+        videoSettings.mode = .offscreen
+        await pipeline.mixer.setVideoMixerSettings(videoSettings)
+        let mixer = pipeline.mixer
+        let videoSize = configuration.videoSize
+        await Task { @ScreenActor in mixer.screen.size = videoSize }.value
+
         await pipeline.mixer.addOutput(pipeline.stream)
         for view in previewViews {
             await pipeline.mixer.addOutput(view)
@@ -174,28 +149,19 @@ actor HaishinKitStreamingSession: StreamingSession {
         }
         await observeStatus(of: pipeline)
 
-        // The app can be backgrounded at any of the awaits above, and until the assignment a few
-        // lines up there is nothing here for `stopCapture` to find: it returns having stopped a
-        // pipeline that did not exist yet, and the camera this call is in the middle of opening
-        // would go on capturing behind a screen the user has left. A moved epoch is that stop, so
-        // everything just built belongs to a capture that is already over and goes now. Tearing
-        // down what a stop landing after the assignment already took down is harmless; leaving a
-        // stop that landed before it with a running pipeline is the bug.
+        // A stop can land during any await above, before `self.pipeline` is assigned, and would
+        // otherwise find nothing to tear down while this call keeps capturing behind it.
         if generation != captureGeneration {
             await tearDownCapture(pipeline)
         }
     }
 
     func stopCapture() async {
-        // Bumped first, and whether or not there is a pipeline. A stop that arrives while the
-        // camera is still opening has nothing to take down, and this is what tells the start in
-        // flight that its result is no longer wanted.
+        // Bumped unconditionally, so a `startCapture` still opening the camera sees it changed.
         captureGeneration += 1
         await tearDownCapture(pipeline)
     }
 
-    /// Every path that ends a capture comes through here: the user's stop, a `startCapture` step
-    /// that failed, and a `startCapture` that finished into a stop already asked for.
     private func tearDownCapture(_ pipeline: Pipeline?) async {
         isPublishing = false
         isPublishHandshakeInFlight = false
@@ -208,16 +174,16 @@ actor HaishinKitStreamingSession: StreamingSession {
 
         guard let pipeline else { return }
         await pipeline.mixer.stopRunning()
-        // Detaching is what hands the camera and the microphone back. Dropping the mixer alone
-        // leaves them attached to it, which is why this runs even when the mixer never started.
+        // Always detach, even if the mixer never started: it holds the camera/mic until told
+        // otherwise, dropping the mixer alone does not release them.
         try? await pipeline.mixer.attachVideo(nil)
         try? await pipeline.mixer.attachAudio(nil)
         await pipeline.mixer.removeOutput(pipeline.stream)
         for view in previewViews {
             await pipeline.mixer.removeOutput(view)
         }
-        // The views themselves go away with the screen; keeping them here would retain one more
-        // dead view per stop, each still being handed frames the next time capture starts.
+        // SwiftUI rebuilds preview views on the next capture; keeping stale ones here would leak
+        // one per stop.
         previewViews.removeAll()
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
@@ -240,8 +206,6 @@ actor HaishinKitStreamingSession: StreamingSession {
         var settings = await pipeline.mixer.audioMixerSettings
         settings.isMuted = isMuted
         await pipeline.mixer.setAudioMixerSettings(settings)
-        // What was actually applied, read back rather than assumed, so the icon on screen can
-        // never claim something the mixer is not doing.
         return await pipeline.mixer.audioMixerSettings.isMuted
     }
 
@@ -252,8 +216,6 @@ actor HaishinKitStreamingSession: StreamingSession {
             throw .unexpected(detail: "startPublishing called before startCapture")
         }
         do {
-            // Every attempt starts from a clean slate, so that nothing a previous one saw can be
-            // read as a reason for this one.
             didCloseDuringPublishHandshake = false
             _ = try await pipeline.connection.connect(endpoint.connectURL)
             isPublishHandshakeInFlight = true
@@ -261,16 +223,14 @@ actor HaishinKitStreamingSession: StreamingSession {
             isPublishHandshakeInFlight = false
             isPublishing = true
         } catch {
-            // `RTMPConnection.connect` refuses outright while the connection is still open. An
-            // attempt that failed at the publish step and left the socket up would therefore make
-            // every later attempt fail instantly with the wrong reason — which also means the
-            // automatic reconnection could never succeed.
             isPublishing = false
-            // Read, and the window closed, before anything of ours is closed: our own `close()`
-            // reaches the status handler as the same code the peer's hang-up does.
+            // Must be read before `close()` below: our own close reaches the status handler as the
+            // same code as the peer hanging up, and would overwrite this otherwise.
             let closedDuringHandshake = didCloseDuringPublishHandshake
             isPublishHandshakeInFlight = false
             didCloseDuringPublishHandshake = false
+            // `connect()` refuses outright while the connection is still open, so a failed attempt
+            // must close both before returning or every retry fails for the wrong reason.
             _ = try? await pipeline.stream.close()
             try? await pipeline.connection.close()
             let failure = Self.publishFailure(from: error, closedDuringHandshake: closedDuringHandshake)
@@ -302,13 +262,8 @@ actor HaishinKitStreamingSession: StreamingSession {
         await installOverlay(overlay, on: pipeline)
     }
 
+    /// Mixer is already compositing (see `startCapture`); this just adds a child to that screen.
     private func installOverlay(_ overlay: any StreamOverlay, on pipeline: Pipeline) async {
-        // Passthrough hands the camera buffer to the encoder untouched, which is what makes it the
-        // cheap default. Compositing requires the mixer to draw the frame itself.
-        var settings = await pipeline.mixer.videoMixerSettings
-        settings.mode = .offscreen
-        await pipeline.mixer.setVideoMixerSettings(settings)
-
         let mixer = pipeline.mixer
         let size = configuration.videoSize
         let placement = overlay.placement
@@ -322,25 +277,20 @@ actor HaishinKitStreamingSession: StreamingSession {
         }
 
         await Task { @ScreenActor in
-            mixer.screen.size = size
             caption.horizontalAlignment = placement.horizontalAlignment
             caption.verticalAlignment = placement.verticalAlignment
-            // Only the top and bottom margins place a centred caption. The side ones still earn
-            // their keep: `TextScreenObject` measures its text against the frame less all four, so
-            // a long caption wraps rather than running into the edges.
-            caption.layoutMargin = .init(top: 24, left: 24, bottom: 24, right: 24)
+            let margins = placement.layoutMargins(in: size)
+            caption.layoutMargin = .init(top: margins.top, left: margins.left, bottom: margins.bottom, right: margins.right)
             caption.string = text
             try? mixer.screen.addChild(caption)
         }.value
 
-        // Something that never changes — a fixed caption, a watermark — is drawn once and given no
-        // timer.
         guard let interval = overlay.refreshInterval else { return }
         overlayTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: interval)
-                if Task.isCancelled { return }
-                await self?.redrawOverlay()
+                guard let self, !Task.isCancelled else { return }
+                await redrawOverlay()
             }
         }
     }
@@ -351,16 +301,14 @@ actor HaishinKitStreamingSession: StreamingSession {
         await Task { @ScreenActor in caption.string = text }.value
     }
 
+    /// Leaves the mixer compositing an empty screen — dropping back to passthrough would trigger
+    /// the same rebuild `.offscreen` above exists to avoid.
     private func removeOverlay(from pipeline: Pipeline) async {
         let mixer = pipeline.mixer
         if let caption = overlayCaption {
             await Task { @ScreenActor in mixer.screen.removeChild(caption) }.value
         }
         overlayCaption = nil
-
-        var settings = await pipeline.mixer.videoMixerSettings
-        settings.mode = .passthrough
-        await pipeline.mixer.setVideoMixerSettings(settings)
     }
 
     func currentStatistics() async -> StreamStatistics {
@@ -371,13 +319,13 @@ actor HaishinKitStreamingSession: StreamingSession {
             configured: configuration,
             appliedVideoSize: video.videoSize,
             appliedVideoBitRate: video.bitRate,
-            // The encoder's own format is not visible outside the library, but the profile it is
-            // running with is, and an HEVC profile is what switches it. So this reports the codec
-            // the encoder actually has rather than the one it was asked for.
+            // The encoder's actual format isn't exposed directly; the profile string is, and an
+            // HEVC profile is what switches it.
             appliedVideoCodec: video.profileLevel.contains("HEVC") ? "HEVC" : "H.264",
             appliedAudioBitRate: audio.bitRate,
             appliedAudioCodec: audio.format == .aac ? "AAC" : String(describing: audio.format),
-            currentFrameRate: Int(await pipeline.stream.currentFPS)
+            currentFrameRate: Int(await pipeline.stream.currentFPS),
+            currentBytesPerSecond: await pipeline.stream.info.currentBytesPerSecond
         )
     }
 
@@ -405,17 +353,15 @@ actor HaishinKitStreamingSession: StreamingSession {
 
     // MARK: - Status
 
-    /// Subscribes to both status streams **once** per pipeline.
-    ///
-    /// `RTMPConnection.status` and `RTMPStream.status` are computed properties that install a new
-    /// continuation on every read, which silently disconnects whoever was reading before. Reading
-    /// either of them a second time anywhere would make this listener go quiet with no error at
-    /// all, so the tasks are created here and nowhere else.
+    /// `connection.status`, `stream.status` and `mixer.isInterputted` are computed properties that
+    /// re-arm on every read, disconnecting the previous reader — so these three must be read
+    /// exactly once, here, per pipeline.
     private func observeStatus(of pipeline: Pipeline) async {
         guard statusTasks.isEmpty else { return }
 
         let connectionStatus = await pipeline.connection.status
         let streamStatus = await pipeline.stream.status
+        let interruptions = await pipeline.mixer.isInterputted
 
         statusTasks = [
             Task { [weak self] in
@@ -428,7 +374,19 @@ actor HaishinKitStreamingSession: StreamingSession {
                     await self?.handleStreamStatus(status)
                 }
             },
+            Task { [weak self] in
+                for await isInterrupted in interruptions {
+                    await self?.handleCaptureInterruption(isInterrupted)
+                }
+            },
         ]
+    }
+
+    /// Capture session interruption (e.g. a phone call), not the connection — nothing on the wire
+    /// changes while it lasts, so this is the only signal that the outgoing picture has frozen.
+    private func handleCaptureInterruption(_ isInterrupted: Bool) {
+        Self.log.notice("capture interrupted: \(isInterrupted, privacy: .public)")
+        continuation.yield(isInterrupted ? .captureInterrupted : .captureResumed)
     }
 
     private func handleConnectionStatus(_ status: RTMPStatus) {
@@ -452,13 +410,11 @@ actor HaishinKitStreamingSession: StreamingSession {
         Self.rtmpLog.debug("stream status: \(status.code, privacy: .public) — \(status.description, privacy: .public)")
         switch RTMPStream.Code(rawValue: status.code) {
         case .publishStart:
-            // The confirmation the handshake was waiting for. From here a close is a lost
-            // broadcast again, not a refused key.
+            // From here a close is a lost broadcast, not a refused key — see `connectionClosed()`.
             isPublishHandshakeInFlight = false
             continuation.yield(.publishing)
         case .publishBadName:
-            // Never seen from Twitch, which hangs up instead — see `connectionClosed()`. Kept
-            // because a server that does say it should be believed.
+            // Never seen from Twitch (it hangs up instead), kept for servers that do report it.
             report(.streamKeyRejected)
         case .connectRejected:
             report(.serverRefused)
@@ -472,14 +428,9 @@ actor HaishinKitStreamingSession: StreamingSession {
         }
     }
 
-    /// The connection went away, which means two different things depending on when it happened.
-    ///
-    /// Inside the publish handshake it is Twitch refusing the stream key. Nothing is publishing
-    /// yet, so there is no drop to report and the fact is remembered instead: the `publish()` call
-    /// still in flight is what carries it to the user, and left to itself it can only say that
-    /// nothing answered in time.
-    ///
-    /// Anywhere else it is what it looks like — the broadcast dropped.
+    /// Inside the publish handshake, a close means Twitch refused the stream key; the in-flight
+    /// `publish()` call reports it once its own timeout fires. Anywhere else, it's a dropped
+    /// broadcast.
     private func connectionClosed() {
         guard isPublishHandshakeInFlight else {
             report(.connectionLost)
@@ -488,8 +439,7 @@ actor HaishinKitStreamingSession: StreamingSession {
         didCloseDuringPublishHandshake = true
     }
 
-    /// Reports a drop, but only if there was a broadcast to drop. Everything after this point is
-    /// the controller's decision — whether to reconnect, and what to put on screen.
+    /// No-op unless there was a broadcast to drop; reconnecting is the controller's call.
     private func report(_ failure: BroadcastFailure) {
         guard isPublishing else { return }
         isPublishing = false
@@ -499,17 +449,10 @@ actor HaishinKitStreamingSession: StreamingSession {
 
     // MARK: - Translating the library's errors
 
-    /// What a publish attempt that never got its `.publishStart` should be called.
-    ///
-    /// A close inside the publish handshake is read as a refused stream key. Twitch answers a bad
-    /// key by hanging up rather than by naming it, so `publish()` waits for a confirmation that is
-    /// never coming and ends in a timeout — which on its own tells the user the server did not
-    /// answer and to check their internet, a dead end for someone whose key is simply wrong.
-    ///
-    /// The window is genuinely ambiguous: a real network drop landing inside it is reported as a
-    /// refused key too. It is the second or two between `publish()` and the server's answer, and
-    /// the two mistakes do not cost the same — "check your stream key" on a working key costs one
-    /// retry, while "check your internet" on a wrong key is a broadcast the user never gets.
+    /// A close during the publish handshake is reported as a refused stream key rather than the
+    /// timeout `publish()` would otherwise see — a real network drop in that same window is
+    /// misclassified too, but "check your key" costs a retry while "check your internet" on a bad
+    /// key loses the broadcast entirely.
     static func publishFailure(from error: any Error, closedDuringHandshake: Bool) -> BroadcastFailure {
         closedDuringHandshake ? .streamKeyRejected : failure(from: error)
     }
@@ -548,9 +491,6 @@ actor HaishinKitStreamingSession: StreamingSession {
         }
     }
 
-    /// The server's own reason, when it gave one. A rejected stream key arrives here, and it is the
-    /// difference between telling the user to check their key and telling them to check the
-    /// network.
     private static func failure(fromStatusCode code: String?) -> BroadcastFailure? {
         guard let code else { return nil }
         if RTMPStream.Code(rawValue: code) == .publishBadName { return .streamKeyRejected }
@@ -577,8 +517,8 @@ actor HaishinKitStreamingSession: StreamingSession {
         try session.setCategory(
             .playAndRecord,
             mode: .videoRecording,
-            // `allowBluetoothHFP` is the same option under its current name, available since
-            // iOS 1.0, so the deployment target of 17.0 needs no availability check for it.
+            // allowBluetoothHFP has been available since iOS 1.0 (renamed API), no availability
+            // check needed for a 17.0 deployment target.
             options: [.defaultToSpeaker, .allowBluetoothHFP]
         )
         try session.setActive(true)
@@ -597,25 +537,22 @@ actor HaishinKitStreamingSession: StreamingSession {
 
 @ScreenActor
 private extension StreamOverlayPlacement {
-    /// `.center` is the one horizontal alignment `ScreenObject` lays out from the frame's width
-    /// alone — `.left` and `.right` add the margin to the edge they hang from. That is what keeps a
-    /// caption on screen at any resolution, and it is why both placements use it.
+    /// `.right` hangs the caption `layoutMargin.right` from the right edge — see `layoutMargins(in:)`
+    /// for how that margin is sized to survive the preview crop.
     var horizontalAlignment: ScreenObject.HorizontalAlignment {
         switch self {
-        case .topCenter, .bottomCenter: .center
+        case .topTrailing: .right
         }
     }
 
     var verticalAlignment: ScreenObject.VerticalAlignment {
         switch self {
-        case .topCenter: .top
-        case .bottomCenter: .bottom
+        case .topTrailing: .top
         }
     }
 }
 
 extension HaishinKitStreamingSession: MTHKViewRepresentable.PreviewSource {
-    /// Called by SwiftUI once, when the preview view is created.
     nonisolated func connect(to view: MTHKView) {
         Task { await attach(previewView: view) }
     }

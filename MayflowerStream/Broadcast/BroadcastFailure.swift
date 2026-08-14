@@ -5,31 +5,30 @@
 //  Created by Slobodianiuk Oleksandr on 11.08.2026.
 //
 
-import Foundation
-
-/// Everything that can go wrong, expressed in the vocabulary the user cares about rather than the
-/// vocabulary the SDK uses.
-///
-/// RTMP status codes, `AVCaptureSession` errors, keychain `OSStatus` values and network failures
-/// all arrive in different shapes, and every one of them has to end up as a sentence on screen.
-/// Translating at the edge — where the raw failure is still understood — means the UI never has to
-/// guess, and the state machine can be tested against these cases without a camera or a server.
+/// Everything that can go wrong, translated at the edge into what the user cares about rather
+/// than RTMP/`AVCaptureSession`/keychain error shapes.
 enum BroadcastFailure: Error, Equatable, Sendable {
 
     // Permissions and hardware
     case cameraAccessDenied
     case microphoneAccessDenied
+    /// Screen Time or a management profile decided this, not the user — kept apart from `denied`
+    /// because there is no Settings switch to point at.
+    case cameraAccessRestricted
+    case microphoneAccessRestricted
     case cameraMissing(CameraFacing)
     case cameraUnavailable
     case microphoneUnavailable
-    /// The system would not give the app a recording audio session — normally another app holding
-    /// it, which is a different problem from a microphone that will not open.
+    /// The system refused a recording audio session, usually another app holding it — distinct from
+    /// a microphone that will not open.
     case audioSessionUnavailable
+    /// System paused the camera (call, another app); frames resume on their own, so this is a
+    /// notice, not a stopped broadcast.
+    case captureInterrupted
 
     // Configuration
     case unsupportedConfiguration(reason: String)
-    /// The encoder refused the settings it was given. Distinct from `unsupportedConfiguration`,
-    /// which is caught by validation before anything is opened.
+    /// Encoder refused the settings at runtime — `unsupportedConfiguration` is caught earlier, by validation.
     case encoderConfigurationFailed
 
     // Connection
@@ -40,8 +39,7 @@ enum BroadcastFailure: Error, Equatable, Sendable {
     case connectionLost
     case reconnectionGaveUp(attempts: Int)
 
-    /// Nothing above matched. Carries the raw text so it can still be read out of a screenshot,
-    /// but the message shown to the user stays plain.
+    /// Carries the raw text for diagnostics; the user-facing message stays plain.
     case unexpected(detail: String)
 }
 
@@ -64,6 +62,10 @@ extension BroadcastFailure {
             "This app does not have permission to use the camera."
         case .microphoneAccessDenied:
             "This app does not have permission to use the microphone."
+        case .cameraAccessRestricted:
+            "Camera access is blocked by a restriction on this device."
+        case .microphoneAccessRestricted:
+            "Microphone access is blocked by a restriction on this device."
         case .cameraMissing(let facing):
             "This device has no \(facing.describedForUser) camera."
         case .cameraUnavailable:
@@ -72,6 +74,8 @@ extension BroadcastFailure {
             "The microphone could not be started."
         case .audioSessionUnavailable:
             "Sound could not be prepared for recording."
+        case .captureInterrupted:
+            "The system paused the camera."
         case .unsupportedConfiguration(let reason):
             reason
         case .encoderConfigurationFailed:
@@ -97,6 +101,8 @@ extension BroadcastFailure {
         switch self {
         case .cameraAccessDenied, .microphoneAccessDenied:
             "Open Settings to allow it, then come back and try again."
+        case .cameraAccessRestricted, .microphoneAccessRestricted:
+            "Screen Time or a profile that manages this device is blocking it. Whoever set that up has to allow it."
         case .cameraMissing:
             "Check that this device has a camera on that side, then try again."
         case .cameraUnavailable:
@@ -105,6 +111,8 @@ extension BroadcastFailure {
             "Close any other app that might be using the microphone and try again."
         case .audioSessionUnavailable:
             "Stop any other app that is playing or recording sound, then try again."
+        case .captureInterrupted:
+            "A call or another app is using it. The picture comes back on its own when they are done."
         case .unsupportedConfiguration:
             nil
         case .encoderConfigurationFailed:
@@ -122,31 +130,27 @@ extension BroadcastFailure {
         }
     }
 
-    /// Whether losing the connection this way is worth retrying on the user's behalf.
-    ///
-    /// A rejected key or a refused broadcast will be rejected again a second later, so retrying
-    /// only delays telling the user the truth. A dropped or timed-out connection is exactly what
-    /// automatic reconnection exists for.
+    /// A rejected key or refused broadcast will fail again immediately, so only drops and timeouts retry.
     var isWorthRetrying: Bool {
         switch self {
         case .connectionLost, .connectionTimedOut, .serverUnreachable:
             true
-        case .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing, .cameraUnavailable,
-             .microphoneUnavailable, .audioSessionUnavailable, .unsupportedConfiguration,
-             .encoderConfigurationFailed, .streamKeyRejected, .serverRefused, .reconnectionGaveUp,
-             .unexpected:
+        case .cameraAccessDenied, .microphoneAccessDenied, .cameraAccessRestricted,
+             .microphoneAccessRestricted, .cameraMissing, .cameraUnavailable,
+             .microphoneUnavailable, .audioSessionUnavailable, .captureInterrupted,
+             .unsupportedConfiguration, .encoderConfigurationFailed, .streamKeyRejected,
+             .serverRefused, .reconnectionGaveUp, .unexpected:
             false
         }
     }
 
-    /// Whether this is about the local camera and microphone rather than about the broadcast.
-    ///
-    /// It decides what "Try again" retries. That has to be read off the failure: the camera being
-    /// open says nothing about which of the two things went wrong.
+    /// Decides what "Try again" retries — the camera being open says nothing about which of the two failed.
     var isDeviceProblem: Bool {
         switch self {
-        case .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing, .cameraUnavailable,
-             .microphoneUnavailable, .audioSessionUnavailable, .encoderConfigurationFailed:
+        case .cameraAccessDenied, .microphoneAccessDenied, .cameraAccessRestricted,
+             .microphoneAccessRestricted, .cameraMissing, .cameraUnavailable,
+             .microphoneUnavailable, .audioSessionUnavailable, .captureInterrupted,
+             .encoderConfigurationFailed:
             true
         case .unsupportedConfiguration, .serverUnreachable, .connectionTimedOut, .streamKeyRejected,
              .serverRefused, .connectionLost, .reconnectionGaveUp, .unexpected:
@@ -154,10 +158,32 @@ extension BroadcastFailure {
         }
     }
 
+    /// Retrying resends the same configuration and fails the same way, so the fix is on the setup screen.
+    var requiresReconfiguration: Bool {
+        switch self {
+        case .streamKeyRejected:
+            true
+        case .cameraAccessDenied, .microphoneAccessDenied, .cameraAccessRestricted,
+             .microphoneAccessRestricted, .cameraMissing, .cameraUnavailable,
+             .microphoneUnavailable, .audioSessionUnavailable, .captureInterrupted,
+             .unsupportedConfiguration, .encoderConfigurationFailed, .serverUnreachable,
+             .connectionTimedOut, .serverRefused, .connectionLost, .reconnectionGaveUp, .unexpected:
+            false
+        }
+    }
+
+    /// Listed case by case rather than `default`, so a new failure doesn't inherit a "Try again" nobody decided to give it.
     var isUserRetryable: Bool {
         switch self {
-        case .unsupportedConfiguration: false
-        default: true
+        case .cameraAccessDenied, .microphoneAccessDenied, .cameraMissing, .cameraUnavailable,
+             .microphoneUnavailable, .audioSessionUnavailable, .encoderConfigurationFailed,
+             .serverUnreachable, .connectionTimedOut, .streamKeyRejected, .serverRefused,
+             .connectionLost, .reconnectionGaveUp, .unexpected:
+            true
+        // A restriction is not lifted by tapping again, and a paused camera comes back by itself.
+        case .cameraAccessRestricted, .microphoneAccessRestricted, .captureInterrupted,
+             .unsupportedConfiguration:
+            false
         }
     }
 

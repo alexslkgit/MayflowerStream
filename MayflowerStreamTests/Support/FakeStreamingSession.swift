@@ -9,9 +9,7 @@ import Foundation
 
 @testable import MayflowerStream
 
-/// A streaming session with no camera, no encoder and no server, driven entirely by the test, so
-/// every state transition and every error path in `BroadcastController` can be exercised on a
-/// machine that has none of the hardware.
+/// A streaming session with no camera, no encoder and no server, driven entirely by the test, so every state transition and error path in `BroadcastController` can be exercised without hardware.
 @MainActor
 final class FakeStreamingSession: StreamingSession {
 
@@ -21,13 +19,11 @@ final class FakeStreamingSession: StreamingSession {
     // What the test wants to happen.
     var captureFailure: BroadcastFailure?
     var switchCameraFailure: BroadcastFailure?
-    /// Consumed one per `startPublishing` call. `nil` means that call succeeds. When the queue runs
-    /// out, every further call succeeds.
     var publishFailures: [BroadcastFailure?] = []
-    /// Make `startCapture`, `startPublishing` and `switchCamera` suspend, so a test can act while
-    /// one of them is in flight.
+    var currentBytesPerSecond: Int?
     var captureDelay: Duration = .zero
     var publishDelay: Duration = .zero
+    var stopPublishingDelay: Duration = .zero
     var switchCameraDelay: Duration = .zero
 
     // What actually happened.
@@ -41,9 +37,7 @@ final class FakeStreamingSession: StreamingSession {
     private(set) var overlay: (any StreamOverlay)?
     var configuration: BroadcastConfiguration = .default
 
-    /// The one library rule that matters to the state machine: RTMP refuses to connect while a
-    /// connection is already open. Modelling it here is what makes "a failed attempt leaves
-    /// nothing open" — the contract written on `StreamingSession.startPublishing` — testable.
+    /// RTMP refuses to connect while a connection is already open — modelling that is what makes the "a failed attempt leaves nothing open" contract on `StreamingSession.startPublishing` testable.
     private(set) var isConnectionOpen = false
 
     init() {
@@ -52,11 +46,7 @@ final class FakeStreamingSession: StreamingSession {
         continuation = escaped
     }
 
-    /// Pretend the server said something.
-    ///
-    /// A drop normally takes the connection with it. `closingConnection: false` is the other case
-    /// — the publish ends while the socket stays up — which is where a session that does not clean
-    /// up after itself makes every following attempt fail for the wrong reason.
+    /// `closingConnection: false` models a drop that ends the publish but leaves the socket up — the case where a session that does not clean up makes every following attempt fail for the wrong reason.
     func emit(_ event: StreamingEvent, closingConnection: Bool = true) {
         if case .disconnected = event, closingConnection { isConnectionOpen = false }
         continuation.yield(event)
@@ -104,6 +94,8 @@ final class FakeStreamingSession: StreamingSession {
 
     func stopPublishing() async {
         publishStopCount += 1
+        // Closed at the end, not the start, because that is when RTMP closes it: a publish attempted mid-goodbye must hit the still-open connection, as it would on the wire.
+        if stopPublishingDelay != .zero { try? await Task.sleep(for: stopPublishingDelay) }
         isConnectionOpen = false
     }
 
@@ -119,8 +111,37 @@ final class FakeStreamingSession: StreamingSession {
             appliedVideoCodec: BroadcastConfiguration.videoCodec,
             appliedAudioBitRate: configuration.audioBitRate,
             appliedAudioCodec: BroadcastConfiguration.audioCodec,
-            currentFrameRate: Int(configuration.frameRate)
+            currentFrameRate: Int(configuration.frameRate),
+            currentBytesPerSecond: currentBytesPerSecond
         )
+    }
+}
+
+/// A connectivity monitor with no network behind it: the test says when the path goes and comes back, including the current-state update every real monitor sends the moment it starts.
+@MainActor
+final class FakeConnectivityMonitor: ConnectivityMonitor {
+
+    /// True while somebody is iterating the updates — a real `NWPathMonitor` lives exactly as long as its stream is being read.
+    private(set) var isWatching = false
+    private var continuation: AsyncStream<Bool>.Continuation?
+
+    func updates() async -> AsyncStream<Bool> {
+        AsyncStream { continuation in
+            self.continuation = continuation
+            isWatching = true
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in self?.stopWatching() }
+            }
+        }
+    }
+
+    func send(isSatisfied: Bool) {
+        continuation?.yield(isSatisfied)
+    }
+
+    private func stopWatching() {
+        isWatching = false
+        continuation = nil
     }
 }
 
@@ -142,8 +163,7 @@ final class StubMediaPermissions: MediaPermissions {
     }
 }
 
-/// Waits for something the controller does on its own — an event it is draining in the background,
-/// or a reconnection attempt — instead of guessing how many `Task.yield()`s it will take.
+/// Waits for something the controller does on its own instead of guessing how many `Task.yield()`s it will take.
 @MainActor
 func waitUntil(
     _ description: String,

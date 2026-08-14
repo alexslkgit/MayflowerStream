@@ -61,8 +61,7 @@ struct StreamStatisticsTests {
 
     @Test("A measured frame rate below the configured one is not a mismatch")
     func aSlowCameraIsNotAMisconfiguredEncoder() {
-        // 29 delivered frames out of 30 asked for is an ordinary healthy broadcast. Counting it
-        // here would put a warning on the sheet for every user, every time.
+        // 29 delivered frames out of 30 asked for is an ordinary healthy broadcast; flagging it would warn on the sheet every time.
         #expect(Self.statistics(frameRate: 29).matchesConfiguration)
         #expect(Self.statistics(frameRate: 0).matchesConfiguration)
     }

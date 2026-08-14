@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// What the user typed on the configuration screen, exactly as typed.
-///
-/// Deliberately not a `StreamEndpoint`: the screen has to be able to restore a half-finished or
-/// even invalid entry, and validation happens when the user tries to move on, not when they type.
+// Deliberately not a `StreamEndpoint`: the screen has to be able to restore a half-finished or
+// even invalid entry, since validation happens when the user tries to move on, not when they type.
 struct StreamSettings: Equatable, Sendable {
     var ingestURL: String
     var streamKey: String
@@ -18,17 +16,17 @@ struct StreamSettings: Equatable, Sendable {
     static let empty = StreamSettings(ingestURL: StreamEndpoint.twitchDefaultIngestURL, streamKey: "")
 }
 
-/// Main-actor bound on purpose: settings are read and written only while a screen is on screen,
-/// so there is nothing here to make concurrency-safe.
+// Main-actor bound on purpose: settings are read and written only while a screen is on screen,
+// so there is nothing here to make concurrency-safe.
 @MainActor
 protocol StreamSettingsStoring {
     func load() -> StreamSettings
     func save(_ settings: StreamSettings) throws
 }
 
-/// The real store. The ingest address is not a secret and lives in `UserDefaults`; the stream key
-/// is a credential — anyone holding it can broadcast to the channel — so it lives in the keychain,
-/// where an unencrypted device backup cannot read it.
+// The ingest address is not a secret and lives in `UserDefaults`; the stream key is a credential
+// — anyone holding it can broadcast to the channel — so it lives in the keychain, where an
+// unencrypted device backup cannot read it.
 @MainActor
 struct KeychainStreamSettingsStore: StreamSettingsStoring {
     private let defaults: UserDefaults
@@ -78,7 +76,7 @@ struct KeychainStreamSettingsStore: StreamSettingsStoring {
         guard !key.isEmpty else {
             let status = SecItemDelete(baseQuery as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw KeychainError(status: status)
+                throw KeychainError()
             }
             return
         }
@@ -86,23 +84,21 @@ struct KeychainStreamSettingsStore: StreamSettingsStoring {
         let data = Data(key.utf8)
         let update: [String: Any] = [
             kSecValueData as String: data,
-            // The app never streams in the background, so the key never needs to be readable while
-            // the device is locked; see the lifecycle section of the README.
+            // The app never streams in the background, so the key never needs to be readable
+            // while the device is locked.
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ]
 
         let updateStatus = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else { throw KeychainError(status: updateStatus) }
+        guard updateStatus == errSecItemNotFound else { throw KeychainError() }
 
         let addStatus = SecItemAdd(baseQuery.merging(update) { $1 } as CFDictionary, nil)
-        guard addStatus == errSecSuccess else { throw KeychainError(status: addStatus) }
+        guard addStatus == errSecSuccess else { throw KeychainError() }
     }
 }
 
 struct KeychainError: Error, LocalizedError {
-    let status: OSStatus
-
     var errorDescription: String? {
         "Your stream key could not be saved to this device."
     }
@@ -112,11 +108,11 @@ struct KeychainError: Error, LocalizedError {
     }
 }
 
-/// Backs SwiftUI previews and unit tests, so neither touches the real keychain.
+// Backs SwiftUI previews and unit tests, so neither touches the real keychain.
 @MainActor
 final class InMemoryStreamSettingsStore: StreamSettingsStoring {
     private var settings: StreamSettings
-    /// Set to make `save` fail, so the "we could not save this" path can be exercised.
+    // Set to make `save` fail, so the "we could not save this" path can be exercised.
     var saveFailure: (any Error)?
 
     init(_ settings: StreamSettings = .empty) {

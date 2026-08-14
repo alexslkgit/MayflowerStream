@@ -5,6 +5,7 @@
 //  Created by Slobodianiuk Oleksandr on 13.08.2026.
 //
 
+import CoreGraphics
 import Foundation
 import Testing
 
@@ -18,13 +19,19 @@ struct StreamOverlayTests {
         #expect(ClockOverlay().refreshInterval == .seconds(1))
     }
 
-    @Test("The clock overlay sits centred, where no screen can cut it off")
-    func clockOverlayIsCentred() {
-        // A caption pinned to a side edge sits a fixed margin from it in the composited frame, and
-        // that is not what the broadcaster sees: the preview aspect-fills the frame into the
-        // device's screen and crops the sides, which is how the clock came to hang off the
-        // right-hand edge on a phone. Centred, it is laid out from the frame's width alone.
-        #expect(ClockOverlay().placement == .topCenter)
+    @Test("The clock overlay sits at the top trailing corner, clear of the status panel and inside every screen's crop")
+    func clockOverlaySitsTopTrailing() {
+        #expect(ClockOverlay().placement == .topTrailing)
+    }
+
+    @Test("The top trailing margins scale with the frame and clear the worst-case preview crop")
+    func topTrailingMarginsScaleWithFrame() {
+        let frame = CGSize(width: 720, height: 1280)
+        let margins = StreamOverlayPlacement.topTrailing.layoutMargins(in: frame)
+        #expect(margins.right == frame.width * 0.15)
+        #expect(margins.top == frame.height * 0.09)
+        // The crop floor: the narrowest phones crop up to ~10% of frame width per side, or the clock reads as cut off.
+        #expect(margins.right >= frame.width * 0.10)
     }
 
     @Test("The clock overlay shows a time, and a different one a minute later")

@@ -10,10 +10,7 @@ import Testing
 
 @testable import MayflowerStream
 
-/// These run against the real keychain and the real `UserDefaults`, inside the host app, which is
-/// the only way to find out whether the store works — a fake keychain would only prove the fake.
-/// Every test uses its own service name and its own defaults suite, so nothing leaks between them
-/// or into the app's own entries.
+/// Run against the real keychain and `UserDefaults` — a fake keychain would only prove the fake — each with its own service name and defaults suite so nothing leaks between tests.
 @MainActor
 @Suite("Where the destination is kept")
 struct StreamSettingsStoreTests {
