@@ -31,6 +31,19 @@ protocol StreamingSession: Sendable {
     /// Leaves capture running.
     func stopPublishing() async
 
+    /// Releases the camera, the microphone and the audio session, and nothing else: publishing
+    /// carries on as far as the server is concerned. For backgrounding, where iOS takes the devices
+    /// away but the connection is ours to keep.
+    func suspendCapture() async
+
+    /// Undoes `suspendCapture()`. Fails the way `startCapture` fails, and leaves nothing behind when
+    /// it does.
+    func resumeCapture() async throws(BroadcastFailure)
+
+    /// Whether the server still holds the publish this session started — the question that decides
+    /// whether a return has anything to reconnect.
+    func isStillPublishing() async -> Bool
+
     /// Safe to call before capture has started; applied when the pipeline is built.
     func setOverlay(_ overlay: (any StreamOverlay)?) async
 

@@ -1,230 +1,135 @@
 # MayflowerStream
 
-**Testing on a device? Please launch the app from the home screen, not under the Xcode
-debugger.** The RTMP pipeline is soft real-time, and an attached debugger — Swift throw
-interception, Main Thread Checker, Metal API validation, unoptimized package builds — can stall
-the main thread for seconds at exactly the moments the app is recovering a dropped connection,
-which then reads as a frozen UI and a stalled video pipeline. None of this happens untethered.
-HaishinKit's maintainer has closed several identical freeze reports the same way (upstream
-issues #1574, #1722: reproducible only under Xcode). Install once, stop the debug session, and
-drive the app standalone.
+An iPhone app that sends the camera and the microphone to Twitch over RTMP. Two screens: one takes
+an ingest address and a stream key and remembers them, the other shows the picture, puts it on air
+on a tap, and never leaves you guessing whether you are actually live.
 
-An iOS app that broadcasts the camera and the microphone to Twitch over RTMP.
+iOS 17.0, Swift 6, SwiftUI, and [HaishinKit 2.2.5](https://github.com/shogo4405/HaishinKit.swift)
+for RTMP, pinned up to the next minor. H.264 video and AAC audio, 720×1280 at 30 fps, 2.5 Mbps video
+and 128 kbps audio, 2-second keyframes. One known hazard in that version: it forwards each media
+buffer in its own unstructured `Task`, so buffers can in theory arrive out of order (upstream #1889,
+fixed in 2.3.0 and not back-ported). This wiring has never shown it, and 2.3.0 is the upgrade path.
 
-Two screens. The first collects an ingest address and a stream key and remembers them. The second
-shows the camera, sends it out on a tap, and never leaves the user guessing whether the broadcast is
-actually live.
+## Two things before your first broadcast
 
-- iOS 17.0+, Swift 6, SwiftUI
-- [HaishinKit 2.2.5](https://github.com/shogo4405/HaishinKit.swift) for RTMP, pinned up to the next
-  minor version
-- H.264 video, AAC audio, 720×1280 at 30 fps and 2.5 Mbps
+**Run it off the home screen, not off Xcode.** The RTMP pipeline is soft real time and an attached
+debugger is not: throw interception, the Main Thread Checker, Metal API validation and unoptimised
+package builds each stall the main thread for seconds, and they pick their moment — usually the one
+where the app is recovering a dropped connection. The frozen UI you get that way never happens
+untethered, and HaishinKit's maintainer has closed several identical reports the same way (upstream
+#1574, #1722). Install once, stop the debug session, launch from the home screen; everything below
+was measured that way.
 
-HaishinKit 2.2.5 has a known ordering hazard: it forwards each media buffer in its own
-unstructured `Task`, so buffers can in theory be delivered out of order (upstream issue #1889,
-fixed in 2.3.0, not back-ported to the 2.2.x line). This app's wiring tolerates it in practice;
-moving to 2.3.0 once it stabilizes is the upgrade path.
+**Turn on Disconnect Protection for the channel**, under Creator Dashboard → Settings → Stream.
+Continuity across an interruption is not a client-side property. With that toggle off, Twitch holds
+nothing, and every blip is a new stream regardless of what this app, OBS, or anything else does. It
+cost me two device passes and one confidently wrong root-cause theory to think of looking at it.
 
-## Running it
+Signing, the simulator's limits, the Twitch walk-through, the wrong-key behaviour and the console
+noise the frameworks print under Xcode are all in [docs/running.md](docs/running.md).
 
-Open `MayflowerStream.xcodeproj` and run the `MayflowerStream` scheme. The camera and the
-microphone only exist on a real device, so the simulator is good for the configuration screen, the
-state machine and the tests, and nothing else. Running on a real device requires selecting your own
-development team under Signing & Capabilities; the project does not pin one.
+## What is worth knowing first
 
-To broadcast, enter a stream key from **Twitch → Creator Dashboard → Settings → Stream**. The
-ingest address is filled in already; Twitch lists the alternatives at
-[ingest.twitch.tv](https://ingest.twitch.tv/ingests). A full ingest URL pasted into the address
-field with the key still on the end is split into its two halves rather than rejected.
+**One RTMP connection per broadcast.** Twitch accepts one live publisher per stream key, so a second
+connection carrying the same key does not resume the first, it displaces it — and a session
+displaced by its own replacement is not a drop the server holds open. Disconnect protection never
+engages, and the uptime is back at zero after a three-second trip to the home screen. This cost me a
+device pass to find. Keeping the one connection means the server sees no publisher change at all:
+the video stops for as long as the app is away, then continues in the same stream and the same VOD.
+An explicit Stop, or leaving the broadcast screen, does say goodbye; those exits are not coming back.
 
-Tests:
+**Coming back from the background is flat at about three seconds, however long you were away.** It
+used to be *equal* to the time away: away 73 s, picture frozen 74 s, preview and outgoing stream
+dead together while the camera ran at 30 fps. HaishinKit's compositor latches its presentation
+timestamp into the future if the camera is attached before the display link has ticked, and drops
+every live frame in silence until the wall clock catches up. Starting the compositor first is the
+whole fix; the hunt and the numbers are in [docs/background-recovery.md](docs/background-recovery.md).
+
+**Half a second to a picture, about 1.3 seconds to being on air**, on an iPhone 13 Pro Max. A
+connection that dies on its own is redialled on a five-rung ladder whose waits are cancelled the
+moment the device reports a usable path again; the screen counts down to the next attempt rather
+than looking hung, and the duration keeps counting through all of it: it is the age of the broadcast,
+not of the current TCP connection. The tables are in [docs/performance.md](docs/performance.md).
+
+**186 tests in 22 suites, all of them running with no camera, no microphone and no server.** They
+cover the state machine and its races, the configuration screen, the endpoint parsing, the keychain
+store, the failure vocabulary and the pure view predicates, through a `FakeStreamingSession` behind
+the `StreamingSession` protocol that counts calls, scripts per-attempt publish failures and takes an
+injectable delay on every slow call — so a race can be arranged rather than hoped for, and a
+reconnection sequence with 31 seconds of backoff runs instantly. No behavioural test went in without
+being watched failing on the specific defect it guards; where a fix already existed, the defect was
+put back and the test observed going red before it went green. A test that has never failed proves
+something about itself and nothing about the code.
+
+The honest boundary: `HaishinKitStreamingSession` needs a camera and a real server, so a regression
+inside the real adapter would not turn the suite red. That half was verified on a device instead,
+and the live pass against a real channel walked the failure paths, deliberately wrong key included.
 
 ```
 xcodebuild -project MayflowerStream.xcodeproj -scheme MayflowerStream \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-## The architecture in a paragraph
+## Verification, and where the detail lives
 
-`StreamConfigurationModel` owns screen 1 and produces a validated `StreamEndpoint`.
-`BroadcastController` owns screen 2: it is the state machine, the duration, and the translation of
-everything that goes wrong into a sentence a person can read. Below it sits one protocol,
-`StreamingSession`, and one implementation of it, `HaishinKitStreamingSession`, which is the only
-file in the app that knows RTMP exists. That single seam is what lets every state transition and
-every error path be tested on a machine with no camera, no microphone and no server — the whole
-suite runs without a single piece of hardware attached. `BroadcastFailure` is the vocabulary the
-two halves share: RTMP status codes, `AVCaptureSession` errors and keychain `OSStatus` values are
-translated at the edge, where the raw failure is still understood, so the UI never has to guess.
+What the suite cannot reach was measured on the device instead, twice, over one scripted scenario.
 
-The state machine has five states — Offline, Connecting, Online, Reconnecting, Error — and they are
-about the *remote stream*, never about the local camera. A running preview with a dead connection is
-Offline, and the panel says Offline. A camera that will not switch while the broadcast is healthy
-does not touch the state at all; it gets its own card on screen, because telling a live broadcaster
-their stream has stopped when it has not is the exact failure the task warns about.
+- [docs/background-recovery.md](docs/background-recovery.md) — the post-suspension freeze: the
+  instrumented device run, the mechanism inside the library, the before/after numbers.
+- [docs/memory-and-performance.md](docs/memory-and-performance.md) — leaks, footprint, sanitizers.
+- [docs/test-report.md](docs/test-report.md) — what each test pins and what it looked like red.
+- [docs/performance.md](docs/performance.md) — timings, the ladder, every kind of background trip.
+- [docs/running.md](docs/running.md) — installing it and setting up the Twitch side.
+- [docs/architecture.md](docs/architecture.md) — the code's shape, the next seams, the build order.
 
-## Decisions worth explaining
+## Decisions, and why
 
-### The camera starts on a second tap
+One line each; the long version of every one of these is in [docs/decisions.md](docs/decisions.md).
 
-Page 3 of the brief says the main screen shows a camera preview; page 4 says nothing should be
-initialised when the screen loads and permissions should be requested only when needed. Those pull
-in opposite directions, so the app takes the strict reading: the screen opens with a *Turn on the
-camera* button, and the tap is both the initialisation and the permission prompt. The broadcast is a
-second, separate tap.
+**The camera starts on a second tap.** The brief says nothing is initialised on load, so that tap is
+both the initialisation and the permission prompt.
 
-The strict reading is also the useful one. It gives the user a moment to frame the shot and mute
-themselves before going out live, and it keeps `HaishinKitStreamingSession` from building anything
-during a SwiftUI view evaluation — `RTMPStream.init` starts a background task that registers with
-its connection, so a pipeline built on `onAppear` would leave a live object behind every time
-SwiftUI re-evaluated the view. That is precisely the leak the brief asks about.
+**One RTMP connection for the whole broadcast.** Anything else makes the return a second publisher
+on the same key, which Twitch displaces rather than resumes.
 
-### Lifecycle: the app does not broadcast in the background
+**The polite goodbye is `closeStream` and nothing else.** `FCUnpublish` and `deleteStream` apply
+only to streams created with an `fcPublishName`, and this wrapper sets none.
 
-On `.background` the app stops publishing, closes the connection and releases the camera and the
-microphone. Coming back to the foreground leaves the user Offline with the camera off, ready to
-start again — nothing resumes behind their back. That covers the preview too: the task asks for
-camera activation only on an explicit action, and a return to the foreground is treated as a fresh
-screen rather than proof that the earlier tap still applies — one tap brings the preview back.
+**The restore waits for the suspend that is still running.** iOS freezes the app partway through
+handing the devices back, so a fast return otherwise finds nothing to restore and the preview dies.
 
-Only `.background` counts. `.inactive` also fires while the system permission alert is on screen,
-and tearing the pipeline down there would fight the very thing the user was just asked to allow.
+**The compositor starts before the devices, and the wait after it is an edge, not a level.** That
+ordering is the freeze fix, and both halves are pinned by tests, because an ordering is the easiest
+thing in the world to undo by accident.
 
-A related situation is the system taking the camera away mid-session — a phone call, another app
-claiming capture. The session surfaces the capture interruption as an event, and the screen shows a
-notice saying the system paused the camera; when the interruption ends the notice removes itself.
-The broadcast state is not touched — it keeps describing the remote stream, not the local camera.
+**The resume closes the dead connection before it redials.** `RTMPConnection.connected` lies after a
+suspension, and the alternative — teaching the controller to forgive `invalidState` — would drag one
+wire protocol through the half of the app whose value is that it does not know RTMP exists.
 
-Because nothing streams while the device is locked, the stream key is stored with
-`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — the strictest keychain class that still works, and
-one that keeps the key out of an unencrypted backup and off any other device.
+**No `.suspended` state.** A sixth state would have leaked into every `isLive` and `isBusy` guard,
+and no screen would render it differently.
 
-One thing survives a background cycle on purpose: the task reading `StreamingSession.events`. It is
-started once, in `init`, and never cancelled — cancelling the consumer of an `AsyncStream` finishes
-that stream permanently, and a reader started afterwards receives nothing at all. An app that did
-that would publish frames while the screen said Connecting for ever.
+**The restore placeholder shows no camera imagery at all.** Spinner, one line, black, and
+specifically not *Turn on the camera*, which would invite a tap that fights what the app is doing.
 
-### Portrait only, and what landscape would take
+**The duration continues instead of restarting.** After a reconnection or a background round trip
+this is the same broadcast, so the panel shows its real age.
 
-The app is locked to portrait, which the brief explicitly allows. The hard part of rotation is not
-the layout; it is that the preview and the outgoing picture must rotate *together*. The preview is
-an `MTHKView` fed by the mixer, and the encoder is fed by the same mixer, so supporting landscape
-means driving `videoOrientation` on the capture connection from the interface orientation, swapping
-the configured `videoSize` (720×1280 becomes 1280×720) and re-applying the encoder settings, and
-deciding what happens to a broadcast that is already live — Twitch will accept a mid-stream
-resolution change, but players handle it badly, so the honest options are to lock the orientation at
-the moment the broadcast starts or to letterbox. That decision belongs with a product owner, and
-locking to portrait is the version that cannot be wrong.
+**Only `.background` tears the devices down.** `.inactive` also fires under the system permission
+alert, where handing the devices back would fight the thing the user was just asked to allow.
 
-### The parameters sheet, and how the settings are verified
+**The event-reading task is started once and never cancelled.** Cancelling the consumer of an
+`AsyncStream` finishes it permanently, and a reader started afterwards receives nothing at all.
 
-Tapping the status panel while Online opens a sheet listing every configured parameter beside what
-the encoder reports it is actually using: resolution, video bitrate, audio bitrate and both codecs
-are read back out of `RTMPStream.videoSettings` and `audioSettings` rather than assumed. When any of
-them disagree, both numbers are shown, the row is orange, and the summary line says so. That is the
-honest version of "guarantee the stream matches the configured settings" — if the encoder ever does
-something else, the user sees it instead of being reassured.
+**The mixer composites for the entire life of a capture.** Switching `videoMixerSettings.mode`
+mid-flight rebuilds the video encoder and interrupts both pictures for about a second.
 
-The frame rate and the data rate are the measured numbers in the sheet — what the camera delivered
-and what actually left the device over the last second, not settings read back. They are shown next
-to the configured values and never flagged, because a camera producing 29 of the 30 frames it was
-asked for is an ordinary healthy broadcast, not a misconfigured encoder.
+**The stream key is stored with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.** Nothing streams
+while the device is locked, so this is the strictest keychain class that still works.
 
-Those same two numbers are on the broadcast screen itself: while the stream is Online, a small
-capsule under the status panel shows the measured frame rate and outgoing data rate, refreshed every
-second. The data rate is the whole stream on the wire — audio and RTMP overhead included — which is
-why it reads a little above the configured 2.5 Mbps video bitrate rather than matching it. Nothing
-is shown there until the first measurement arrives, because the library's network monitor ticks once
-a second and starts at zero, and a HUD reading "0 fps · 0 kbit/s" under a live indicator would say
-the opposite of what is happening.
+**Portrait only.** Rotating the preview and the outgoing picture together ends in a product decision
+about what a live broadcast does mid-rotation, and portrait is the version that cannot be wrong.
 
-### The quality settings are a constant, and `validate()` is there anyway
-
-`BroadcastConfiguration.default` is fixed: 720×1280, 2.5 Mbps, 128 kbps AAC, 30 fps, 2-second
-keyframes. There is no settings screen, so today `validate()` can never fail. It exists because the
-moment there is one — and "let the user pick a quality" is the obvious next ticket — the limits it
-checks (Twitch's published ones) are what stop the app from opening a broadcast the server will
-drop, and it fails with a sentence the user can act on instead of an error from inside the encoder.
-It is covered by tests now, so it is already trustworthy on the day a settings screen exists to
-call it.
-
-Codecs are not settings: the brief fixes them at H.264 and AAC, so they are constants and are
-reported to the user rather than chosen by them.
-
-### Where an overlay plugs in
-
-`StreamingSession.setOverlay(_:)`, with `StreamOverlay` as the protocol and `ClockOverlay` as a
-worked example — the clock button on the broadcast screen turns it on, and it is off by default.
-
-The mechanism is `MediaMixer.screen`. Setting `videoMixerSettings.mode` to `.offscreen` makes the
-mixer compose each frame itself, and anything added as a child of that screen is drawn on top. The
-mode is entered once, at capture start: flipping it mid-flight rebuilds the video encoder and steps
-timestamps backward across clock domains, which interrupts both the preview and the outgoing stream
-for about a second — so the mixer composes for the whole life of a capture, and toggling the clock
-is a constant-time add or remove of one screen object. The
-composited frame is then what *every* output receives, so a single overlay lands in the encoded
-stream and in the on-screen preview at once — what the broadcaster sees is what the viewers see. A
-`MediaMixerOutput` cannot do this: an output only receives finished frames and cannot change them.
-
-A richer *text* overlay — a longer caption, a viewer count, a lower third — is the same protocol
-with a different implementation; only `HaishinKitStreamingSession` learns how to draw a new kind.
-An overlay whose content is an image is not a drop-in: `StreamOverlay`'s only content method,
-`text(at:)`, returns a `String`, and `HaishinKitStreamingSession` hard-wires a `TextScreenObject`,
-so an image overlay would need the protocol to grow an image-content requirement first — HaishinKit
-already has `ImageScreenObject` for the rendering side, so only the protocol boundary is missing.
-
-The same two seams the overlay uses would carry most of what comes next. Local recording would be
-a `StreamRecorder` added as another mixer output, sitting next to the encoder rather than replacing
-it. Video filters would be a `VideoEffect` registered on the same offscreen rendering the capture
-already runs, so they would compose with an overlay rather than compete with it. A
-different wire protocol, such as SRT, would be another `StreamingSession` implementation behind the
-existing one, with everything above the seam — the state machine, the parameters sheet, the UI —
-unaware which one is running.
-
-### Reconnection
-
-A connection that drops on its own is re-established without asking: five attempts, 1, 2, 4, 8 and
-16 seconds apart. Those waits are for a network that is still away — once the device reports a path
-again, the wait that is running is dropped and so is every wait after it, for as long as the path
-stays up, so coming out of a lift or off airplane mode does not leave the user watching a backoff
-that has nothing left to wait for. Attempts against a live path either succeed or fail quickly, and
-if the path goes away again the waiting comes back with it. The waiting is the only thing
-reachability decides; whether the broadcast is back is still the server's answer. The one delay I cannot shorten is an attempt already in flight when the network
-returns: HaishinKit's connect timer is a hardcoded 15 seconds, so that is the worst case before the
-next attempt. A failure that cannot succeed on a second try — a rejected stream key, a refused
-broadcast — is not retried at all, because retrying only delays telling the user the truth. The
-duration keeps counting through a reconnection: it is the length of the broadcast, not the length of
-the current TCP connection.
-
-## What is not covered by tests
-
-The tests cover the state machine, the configuration screen, the endpoint parsing, the keychain
-store and the failure vocabulary, and they were checked by reintroducing each defect they were
-written for and confirming the suite went red.
-
-`HaishinKitStreamingSession` itself needs a camera and a server, so it is verified on a device
-instead. The protocol contract it has to honour — a failed `startPublishing` leaves nothing open, so
-the next attempt can succeed — is written on the protocol and pinned by the fake session, but a
-regression inside the real adapter would not turn the suite red. That is the honest boundary of
-what can be tested without hardware.
-
-## How the work went
-
-The build order followed the dependency graph rather than the screen order: the settings screen
-first, since it depends on nothing else; then the broadcast state machine and its failure taxonomy,
-written and tested without any hardware attached; then the HaishinKit layer — H.264 and AAC
-configured, RTMP status codes mapped to the human-readable errors the state machine expects — behind
-the `StreamingSession` seam; then the main screen, which by that point was mostly wiring. A
-deliberate hardening pass followed once the pieces were assembled, and it turned up real bugs: races
-between confirmation events and calls still in flight, and lifecycle edge cases around backgrounding.
-Each fix was pinned by a test that was watched failing on the code as it stood before the fix, never
-written after the fact to match it. The rule behind that, held throughout: no behavioral test was
-accepted into the suite without being seen red on the specific defect it guards — a test that has
-never failed proves nothing about the code, only about itself. The last step was live verification
-against a real Twitch channel, walking both the success path and the failure paths, including a
-deliberately wrong stream key, to see the rejection surface as the sentence a user would actually
-read.
-
-AI tools were part of that process, used as an instrument rather than a source of decisions: every
-architectural choice, every line and every comment here was written or reviewed by hand and is one
-the author can defend. The test suite was held to the same standard as the rest of the app — proven
-by breaking the code and watching the test catch it, not trusted because it came back green.
+**`BroadcastConfiguration.validate()` exists even though it can never fail today.** The moment there
+is a settings screen, the Twitch limits it checks are what stop the app opening a broadcast the
+server will drop.

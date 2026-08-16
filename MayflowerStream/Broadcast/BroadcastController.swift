@@ -17,6 +17,9 @@ final class BroadcastController {
     private(set) var isCapturing = false
     private(set) var isMicrophoneMuted = false
     private(set) var isClockOverlayVisible = false
+    /// Spans the whole background round trip, from the suspend to the end of the restore, so the
+    /// screen has something to show over the stretch where the camera is genuinely down.
+    private(set) var isRestoring = false
     var cameraFacing: CameraFacing { configuration.cameraFacing }
     private(set) var elapsedSeconds: Int = 0
     /// Whole seconds left of the current backoff wait; nil while an attempt is actually in flight.
@@ -34,6 +37,7 @@ final class BroadcastController {
     private let connectivity: any ConnectivityMonitor
     private let countdownTick: Duration
     private let pathSettleDelay: Duration
+    private let heldSessionRecheck: Duration
     private var configuration: BroadcastConfiguration
 
     private var eventTask: Task<Void, Never>?
@@ -41,6 +45,7 @@ final class BroadcastController {
     private var countdownTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var connectivityTask: Task<Void, Never>?
+    private var heldSessionRecheckTask: Task<Void, Never>?
     /// `stopBroadcast()` goes offline before this runs; every caller awaits it so two handshakes
     /// never race on one RTMP connection.
     private var teardownTask: Task<Void, Never>?
@@ -52,6 +57,21 @@ final class BroadcastController {
     private var isPathSettleOwed = false
     private var startedAt: Date?
     private var isStartingCapture = false
+    /// Armed only by `suspendForBackground()`, so leaving the screen never brings the camera back.
+    private var isPreviewRestoreOwed = false
+    private var isBroadcastResumeOwed = false
+    /// When the resumed broadcast went on air originally, so its duration keeps counting.
+    private var resumeStartedAt: Date?
+    private var isClockOverlayRestoreOwed = false
+    private var isMicrophoneMuteRestoreOwed = false
+    /// The backgrounding teardown in flight. iOS freezes the goodbye to the server for the whole
+    /// stay in the background, so a return routinely lands before it finishes — the restore must
+    /// wait for it, or it reads flags that are not armed yet and quietly does nothing.
+    private var suspendTask: Task<Void, Never>?
+    /// A `.publishing` event can land after the publish it belongs to was already torn down. Without
+    /// this the resumed broadcast would accept that stale event as its own and read Online over a
+    /// stream nobody re-published.
+    private var isPublishRequested = false
     private var isTogglingMicrophone = false
     private var isSwitchingCamera = false
     /// Bumped on every stop; anything in flight from an older generation is discarded on completion.
@@ -65,7 +85,8 @@ final class BroadcastController {
         reconnectPolicy: ReconnectPolicy = .default,
         connectivity: any ConnectivityMonitor = NetworkPathMonitor(),
         countdownTick: Duration = .seconds(1),
-        pathSettleDelay: Duration = .milliseconds(750)
+        pathSettleDelay: Duration = .milliseconds(750),
+        heldSessionRecheck: Duration = .seconds(3)
     ) {
         self.endpoint = endpoint
         self.session = session
@@ -75,6 +96,7 @@ final class BroadcastController {
         self.connectivity = connectivity
         self.countdownTick = countdownTick
         self.pathSettleDelay = pathSettleDelay
+        self.heldSessionRecheck = heldSessionRecheck
         listenForEvents()
     }
 
@@ -99,15 +121,21 @@ final class BroadcastController {
 
         do {
             try await session.startCapture(configuration)
-            guard generation == broadcastGeneration else { return }
-            isCapturing = true
-            isMicrophoneMuted = false
-            notice = nil
-            if state.failure != nil { state = .offline }
+            captureCameUp(generation: generation)
         } catch {
             guard generation == broadcastGeneration else { return }
             state = .failed(error)
         }
+    }
+
+    /// The writes both capture paths share, behind the generation guard both need: a `shutDown()` can
+    /// land inside either await, and what it turned off must stay off.
+    private func captureCameUp(generation: Int) {
+        guard generation == broadcastGeneration else { return }
+        isCapturing = true
+        isMicrophoneMuted = false
+        notice = nil
+        if state.failure != nil { state = .offline }
     }
 
     func switchCamera() async {
@@ -158,6 +186,7 @@ final class BroadcastController {
         await waitForTeardown()
         guard generation == broadcastGeneration else { return }
         do {
+            isPublishRequested = true
             try await session.startPublishing(to: endpoint)
             // `.publishing` can arrive first and set `.online` before this returns; both are this
             // broadcast succeeding, and `goOnline()` is idempotent.
@@ -180,6 +209,7 @@ final class BroadcastController {
         stopTimer()
         statistics = nil
         state = .offline
+        isPublishRequested = false
 
         beginTeardown()
         await waitForTeardown()
@@ -209,15 +239,120 @@ final class BroadcastController {
         }
     }
 
+    /// Backgrounding gives the devices back and remembers a running camera and a broadcast that was
+    /// on air, so both can be picked up on the way back. What it does not give back is the RTMP
+    /// session: it stays open behind the screen for the whole stay away.
+    func suspendForBackground() async {
+        // Before every await, because the teardown below routinely finishes after the return, and by
+        // then the screen has already asked what to draw.
+        if isCapturing { isRestoring = true }
+        if let pending = suspendTask {
+            await pending.value
+            suspendTask = nil
+        }
+        // Read before the teardown, which is what clears them.
+        let wasCapturing = isCapturing
+        let wasBroadcasting = state.isLive || state.isBusy
+        let wasLiveSince = startedAt
+        let wasClockVisible = isClockOverlayVisible
+        let wasMuted = isMicrophoneMuted
+        let teardown = Task { [weak self] in
+            guard let self else { return }
+            await tearDown(quietly: true)
+            isPreviewRestoreOwed = wasCapturing
+            isBroadcastResumeOwed = wasBroadcasting
+            resumeStartedAt = wasBroadcasting ? wasLiveSince : nil
+            isClockOverlayRestoreOwed = wasCapturing && wasClockVisible
+            isMicrophoneMuteRestoreOwed = wasCapturing && wasMuted
+        }
+        suspendTask = teardown
+        await teardown.value
+    }
+
+    /// A broadcast the server is still holding needs no publish at all — nothing on the wire ended,
+    /// only the picture stopped. One the server let go of comes back through the reconnection ladder
+    /// rather than a cold start: that is the same situation as a dropped connection, over the same
+    /// connection object, and the ladder is the path that reads a refusal there as the network
+    /// rather than a rejected key.
+    func restoreAfterForeground() async {
+        defer { isRestoring = false }
+        if let pending = suspendTask {
+            await pending.value
+            suspendTask = nil
+        }
+        guard isPreviewRestoreOwed else { return }
+        isPreviewRestoreOwed = false
+        let shouldResumeBroadcast = isBroadcastResumeOwed
+        isBroadcastResumeOwed = false
+        let wasLiveSince = resumeStartedAt
+        resumeStartedAt = nil
+        let shouldRestoreClock = isClockOverlayRestoreOwed
+        isClockOverlayRestoreOwed = false
+        let shouldRestoreMute = isMicrophoneMuteRestoreOwed
+        isMicrophoneMuteRestoreOwed = false
+
+        let generation = broadcastGeneration
+        do {
+            try await session.resumeCapture()
+            captureCameUp(generation: generation)
+        } catch {
+            guard generation == broadcastGeneration else { return }
+            state = .failed(error)
+        }
+        guard isCapturing else { return }
+        if shouldRestoreClock {
+            isClockOverlayVisible = true
+            await session.setOverlay(ClockOverlay())
+        }
+        if shouldRestoreMute {
+            isMicrophoneMuted = await session.setMicrophoneMuted(true)
+        }
+        guard shouldResumeBroadcast else { return }
+        // Same broadcast, same clock: `goOnline()` only stamps a start when there is none — and the
+        // panel shows the duration all through `.reconnecting`, long before that runs.
+        startedAt = wasLiveSince
+        updateElapsed()
+        if await session.isStillPublishing() {
+            await goOnline()
+            recheckHeldSession(generation: generation)
+        } else {
+            // A publish the server let go of can leave a connection the session still believes is
+            // open, and a dial over it is refused; close it first so the ladder's first attempt
+            // counts.
+            beginTeardown()
+            await waitForTeardown()
+            guard generation == broadcastGeneration else { return }
+            beginReconnecting(skipFirstWait: true)
+        }
+    }
+
     /// The event reader is left running: cancelling an `AsyncStream` reader ends it for good, and a
     /// reader started for the next broadcast would receive nothing.
     func shutDown() async {
+        isRestoring = false
+        await tearDown(quietly: false)
+    }
+
+    /// `quietly` keeps the RTMP session up and takes only the devices, so the server sees a lag
+    /// rather than a departure; only the backgrounding path wants that. A deliberate exit says
+    /// goodbye and ends the stream for good.
+    private func tearDown(quietly: Bool) async {
         broadcastGeneration += 1
         cancelReconnection()
         stopTimer()
+        isPreviewRestoreOwed = false
+        isBroadcastResumeOwed = false
+        resumeStartedAt = nil
+        isClockOverlayRestoreOwed = false
+        isMicrophoneMuteRestoreOwed = false
+        isPublishRequested = false
         await waitForTeardown()
-        await session.stopPublishing()
-        await session.stopCapture()
+        if quietly {
+            await session.suspendCapture()
+        } else {
+            await session.stopPublishing()
+            await session.stopCapture()
+        }
         isCapturing = false
         statistics = nil
         state = .offline
@@ -249,7 +384,7 @@ final class BroadcastController {
     private func handle(_ event: StreamingEvent) async {
         switch event {
         case .publishing:
-            guard state.isLive || state.isBusy else { return }
+            guard isPublishRequested, state.isLive || state.isBusy else { return }
             await goOnline()
 
         case .disconnected(let failure):
@@ -285,7 +420,10 @@ final class BroadcastController {
         await refreshStatistics()
     }
 
-    private func beginReconnecting() {
+    /// `skipFirstWait` is for a ladder started by something other than an attempt that failed: there
+    /// is nothing to back off from, and the wait is a second of dead air. The skip the returning
+    /// network buys cannot cover this — the path never went away.
+    private func beginReconnecting(skipFirstWait: Bool = false) {
         guard reconnectTask == nil else { return }
         startWatchingConnectivity()
         reconnectTask = Task { [weak self] in
@@ -293,10 +431,13 @@ final class BroadcastController {
             let generation = broadcastGeneration
             for attempt in 1...reconnectPolicy.maximumAttempts {
                 state = .reconnecting(attempt: attempt)
-                await waitBeforeAttempt(reconnectPolicy.delay(attempt))
+                if attempt > 1 || !skipFirstWait {
+                    await waitBeforeAttempt(reconnectPolicy.delay(attempt))
+                }
                 if Task.isCancelled || generation != broadcastGeneration { return }
 
                 do {
+                    isPublishRequested = true
                     try await session.startPublishing(to: endpoint)
                     // Decided from generation/state, not `Task.isCancelled`: the `.publishing` event
                     // routinely fires first and its `goOnline()` cancels this task on success.
@@ -323,6 +464,22 @@ final class BroadcastController {
             stopTimer()
             statistics = nil
             state = .failed(.reconnectionGaveUp(attempts: reconnectPolicy.maximumAttempts))
+        }
+    }
+
+    /// A server that hung up while the process was frozen sends a FIN the socket reads only once the
+    /// app is running again, so the answer taken at the moment of the return can be a connection that
+    /// has not heard the news yet. Asked once more when it has; until then the panel says Online over
+    /// a socket nothing is going out of.
+    private func recheckHeldSession(generation: Int) {
+        let delay = heldSessionRecheck
+        heldSessionRecheckTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled, generation == broadcastGeneration else { return }
+            guard state == .online, reconnectTask == nil else { return }
+            guard await session.isStillPublishing() == false else { return }
+            guard generation == broadcastGeneration, state == .online else { return }
+            beginReconnecting(skipFirstWait: true)
         }
     }
 
@@ -412,6 +569,8 @@ final class BroadcastController {
     private func cancelReconnection() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        heldSessionRecheckTask?.cancel()
+        heldSessionRecheckTask = nil
         stopCountdown()
         stopWatchingConnectivity()
     }

@@ -24,14 +24,23 @@ final class FakeStreamingSession: StreamingSession {
     var captureDelay: Duration = .zero
     var publishDelay: Duration = .zero
     var stopPublishingDelay: Duration = .zero
+    var suspendCaptureDelay: Duration = .zero
     var switchCameraDelay: Duration = .zero
+    /// What the server does with the publish over a background stay: hold it, or let it go the way a real drop would.
+    var keepsPublishingWhileSuspended = false
+    /// Measured on the device: a socket the system reclaimed while the process was frozen is still reported as open by the library long after the publish on it is gone, and RTMP refuses to dial a connection it believes is open.
+    var leavesTheConnectionOpenAfterTheDrop = false
 
     // What actually happened.
     private(set) var captureStartCount = 0
     private(set) var captureStopCount = 0
+    private(set) var captureSuspendCount = 0
+    private(set) var captureResumeCount = 0
     private(set) var publishStartCount = 0
     private(set) var publishStopCount = 0
     private(set) var switchCameraCount = 0
+    /// The whole point of the suspend: a round trip that keeps this true never built a second pipeline, and never published a second time over the same stream key.
+    private(set) var isPipelineAlive = false
     private(set) var facing: CameraFacing = .back
     private(set) var isMicrophoneMuted = false
     private(set) var overlay: (any StreamOverlay)?
@@ -60,10 +69,35 @@ final class FakeStreamingSession: StreamingSession {
         if let captureFailure { throw captureFailure }
         self.configuration = configuration
         facing = configuration.cameraFacing
+        isPipelineAlive = true
     }
 
     func stopCapture() async {
         captureStopCount += 1
+        isPipelineAlive = false
+    }
+
+    func suspendCapture() async {
+        captureSuspendCount += 1
+        // The real suspend takes time — the devices going back to the system — and the fast-return race is about that window.
+        if suspendCaptureDelay != .zero { try? await Task.sleep(for: suspendCaptureDelay) }
+        // A publish the server let go of usually has no connection left under it either; the library closes both together, which is what lets the ladder connect again.
+        if !keepsPublishingWhileSuspended, !leavesTheConnectionOpenAfterTheDrop { isConnectionOpen = false }
+    }
+
+    func resumeCapture() async throws(BroadcastFailure) {
+        captureResumeCount += 1
+        if captureDelay != .zero { try? await Task.sleep(for: captureDelay) }
+        if let captureFailure {
+            // Matches the real session: a resume that cannot get the devices back leaves no pipeline behind, so Try again starts from nothing.
+            isPipelineAlive = false
+            isConnectionOpen = false
+            throw captureFailure
+        }
+    }
+
+    func isStillPublishing() async -> Bool {
+        isConnectionOpen && keepsPublishingWhileSuspended
     }
 
     func switchCamera(to facing: CameraFacing) async throws(BroadcastFailure) {

@@ -13,6 +13,8 @@ private enum Strings {
     static func nextAttempt(inSeconds seconds: Int) -> String { "Next attempt in \(seconds)s" }
     static let cameraOffMessage = "The camera is off."
     static let turnOnCamera = "Turn on the camera"
+    static let restoringCamera = "Bringing the camera back…"
+    static let resumingBroadcast = "Picking the broadcast back up…"
     static let muteMicrophone = "Mute microphone"
     static let unmuteMicrophone = "Unmute microphone"
     static let showClockOverlay = "Show the clock overlay"
@@ -43,12 +45,21 @@ struct StreamView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if controller.isCapturing {
+            switch Self.backdrop(
+                isRestoring: controller.isRestoring,
+                isCapturing: controller.isCapturing,
+                state: controller.state
+            ) {
+            case .preview:
                 // Excludes the top edge only, so the preview never draws under the status bar.
                 CameraPreview(session: screen.session)
                     .equatable()
                     .ignoresSafeArea(edges: [.horizontal, .bottom])
-            } else {
+            case .restoringCamera:
+                restorePlaceholder(Strings.restoringCamera)
+            case .resumingBroadcast:
+                restorePlaceholder(Strings.resumingBroadcast)
+            case .cameraOff:
                 idlePlaceholder
             }
 
@@ -103,7 +114,9 @@ struct StreamView: View {
         .onChange(of: scenePhase) { _, phase in
             if Self.shouldShutDown(on: phase) {
                 UIApplication.shared.isIdleTimerDisabled = false
-                Task { await controller.shutDown() }
+                Task { await controller.suspendForBackground() }
+            } else if Self.shouldRestorePreview(on: phase) {
+                Task { await controller.restoreAfterForeground() }
             }
         }
         .onDisappear {
@@ -116,6 +129,32 @@ struct StreamView: View {
     // should tear the camera down.
     nonisolated static func shouldShutDown(on phase: ScenePhase) -> Bool {
         phase == .background
+    }
+
+    /// Asking is free: the controller only owes a restore after a real `.background`, so returning
+    /// from a permission alert or Control Centre finds nothing to do.
+    nonisolated static func shouldRestorePreview(on phase: ScenePhase) -> Bool {
+        phase == .active
+    }
+
+    enum Backdrop: Equatable {
+        case preview
+        case restoringCamera
+        case resumingBroadcast
+        case cameraOff
+    }
+
+    /// Pure for the same reason as `cardActions(for:)`. A restore releases the camera before it starts
+    /// it again, so the plain reading of `isCapturing` offers *Turn on the camera* for something the
+    /// app is already doing — a button whose only effect is to fight the restore.
+    nonisolated static func backdrop(
+        isRestoring: Bool,
+        isCapturing: Bool,
+        state: BroadcastState
+    ) -> Backdrop {
+        guard isRestoring else { return isCapturing ? .preview : .cameraOff }
+        if case .reconnecting = state { return .resumingBroadcast }
+        return .restoringCamera
     }
 
     // MARK: - Pieces
@@ -161,6 +200,20 @@ struct StreamView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
+    }
+
+    // No camera imagery and nothing to tap: the last frame is stale and every control here belongs
+    // to a pipeline that is being rebuilt.
+    private func restorePlaceholder(_ message: String) -> some View {
+        VStack(spacing: 20) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+            Text(message)
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(message)
     }
 
     // Layered in its own ZStack so the record button stays centred on the screen rather than
@@ -352,17 +405,32 @@ private struct CameraPreview: View, Equatable {
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.session === rhs.session }
 }
 
-// Owns the session and controller for one visit to this screen; SwiftUI recreates view structs
-// freely and both of these must be created once.
+// Owns the session and controller for one visit to this screen, opened on first use rather than in
+// `init`: SwiftUI constructs the view struct — and this class with it — on every invalidation and
+// keeps only the one it installed. A controller built in `init` outlives the struct it was discarded
+// with, its event reader still attached to a session nothing else can reach; three of them were
+// alive at once.
 @MainActor
 final class StreamScreen {
-    let session: HaishinKitStreamingSession
-    let controller: BroadcastController
+    private let endpoint: StreamEndpoint
+    private var opened: (session: HaishinKitStreamingSession, controller: BroadcastController)?
+
+    /// False for every construction SwiftUI throws away, which is all of them but one.
+    var hasOpened: Bool { opened != nil }
+
+    var session: HaishinKitStreamingSession { open().session }
+    var controller: BroadcastController { open().controller }
 
     init(endpoint: StreamEndpoint) {
+        self.endpoint = endpoint
+    }
+
+    private func open() -> (session: HaishinKitStreamingSession, controller: BroadcastController) {
+        if let opened { return opened }
         let session = HaishinKitStreamingSession()
-        self.session = session
-        self.controller = BroadcastController(endpoint: endpoint, session: session)
+        let opened = (session: session, controller: BroadcastController(endpoint: endpoint, session: session))
+        self.opened = opened
+        return opened
     }
 }
 

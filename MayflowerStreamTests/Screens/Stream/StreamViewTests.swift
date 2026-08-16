@@ -10,7 +10,7 @@ import Testing
 
 @testable import MayflowerStream
 
-@Suite("When the broadcast is torn down for a scene phase change")
+@Suite("What a scene phase change does to the broadcast")
 struct StreamViewTests {
 
     @Test("Backgrounding shuts the broadcast down")
@@ -26,6 +26,54 @@ struct StreamViewTests {
     @Test("Active does not shut the broadcast down")
     func activeDoesNotShutDown() {
         #expect(!StreamView.shouldShutDown(on: .active))
+    }
+
+    @Test("Becoming active is what asks for the preview back")
+    func activeRestoresThePreview() {
+        #expect(StreamView.shouldRestorePreview(on: .active))
+    }
+
+    @Test("Inactive asks for nothing back")
+    func inactiveRestoresNothing() {
+        #expect(!StreamView.shouldRestorePreview(on: .inactive))
+    }
+
+    @Test("Backgrounding asks for nothing back")
+    func backgroundRestoresNothing() {
+        #expect(!StreamView.shouldRestorePreview(on: .background))
+    }
+}
+
+@Suite("What the stream screen puts behind the controls")
+struct StreamViewBackdropTests {
+
+    /// The bug this answers: the restore releases the camera before it starts it again, so the *Turn on the camera* screen flashes over a camera the app is already bringing back.
+    @Test("A restore never shows the camera-off screen, whatever the camera is doing at that instant")
+    func aRestoreHidesTheCameraOffScreen() {
+        #expect(StreamView.backdrop(isRestoring: true, isCapturing: false, state: .offline) == .restoringCamera)
+        #expect(StreamView.backdrop(isRestoring: true, isCapturing: true, state: .offline) == .restoringCamera)
+    }
+
+    @Test("A restore that has reached the ladder names the broadcast instead of still blaming the camera")
+    func aRestoreOnTheLadderNamesTheBroadcast() {
+        #expect(
+            StreamView.backdrop(isRestoring: true, isCapturing: true, state: .reconnecting(attempt: 2))
+                == .resumingBroadcast
+        )
+    }
+
+    @Test("Outside a restore the camera decides what is shown")
+    func outsideARestoreTheCameraDecides() {
+        #expect(StreamView.backdrop(isRestoring: false, isCapturing: true, state: .online) == .preview)
+        #expect(StreamView.backdrop(isRestoring: false, isCapturing: false, state: .offline) == .cameraOff)
+    }
+
+    /// An ordinary drop mid-broadcast reconnects with the camera still running, and covering the live preview with a spinner would hide the shot the user is still framing.
+    @Test("A reconnection with no restore behind it keeps the preview")
+    func anOrdinaryReconnectionKeepsThePreview() {
+        #expect(
+            StreamView.backdrop(isRestoring: false, isCapturing: true, state: .reconnecting(attempt: 1)) == .preview
+        )
     }
 }
 
@@ -63,6 +111,36 @@ struct StreamViewFailureCardTests {
     func unsupportedConfigurationOffersNothing() {
         let unsupported = BroadcastFailure.unsupportedConfiguration(reason: "The frame rate is too high.")
         #expect(StreamView.cardActions(for: unsupported).isEmpty)
+    }
+}
+
+/// The device trace counted three of everything: three controllers, three sessions with an event reader each. SwiftUI constructs the view struct on every invalidation and installs the first one it was given, so anything the struct's `init` builds is built once per construction and only one of them is ever used again — the rest keep running behind a screen that was thrown away.
+@MainActor
+@Suite("What constructing the stream screen costs")
+struct StreamScreenTests {
+
+    private static let endpoint = StreamEndpoint(connectURL: "rtmp://example.com/app", streamKey: "k")
+
+    @Test("Constructing the screen opens neither a session nor a controller")
+    func constructingTheScreenOpensNothing() {
+        let screen = StreamScreen(endpoint: Self.endpoint)
+
+        #expect(
+            screen.hasOpened == false,
+            "a session and a controller were opened for a screen SwiftUI may throw away unused, and both keep running once they exist"
+        )
+    }
+
+    @Test("The screen opens once, however often it is asked")
+    func theScreenOpensOnce() {
+        let screen = StreamScreen(endpoint: Self.endpoint)
+
+        let controller = screen.controller
+        let session = screen.session
+
+        #expect(screen.hasOpened)
+        #expect(screen.controller === controller, "a second controller for one visit to the screen")
+        #expect(screen.session === session, "a second session for one visit to the screen")
     }
 }
 

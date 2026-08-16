@@ -11,6 +11,16 @@ import OSLog
 import RTMPHaishinKit
 import VideoToolbox
 
+/// The steps that bring a capture pipeline up, in the order `HaishinKitStreamingSession.bringUpCapture`
+/// runs them. A protocol so that order can be asserted without a camera.
+protocol CaptureBringUp {
+    func startCompositor() async
+    func awaitFirstCompositedFrame() async
+    func attachDevices() async throws(BroadcastFailure)
+    func awaitFirstVideoInput() async
+    func attachStreamOutput() async
+}
+
 actor HaishinKitStreamingSession: StreamingSession {
 
     nonisolated let events: AsyncStream<StreamingEvent>
@@ -42,7 +52,12 @@ actor HaishinKitStreamingSession: StreamingSession {
     private var overlayCaption: TextScreenObject?
     private var overlayTask: Task<Void, Never>?
 
-    private var previewViews: [MTHKView] = []
+    private var previewViews = WeakPreviewViews<MTHKView>()
+
+    /// `UInt8.max` is what the mixer marks its composited output with; track 0 is the camera's raw
+    /// input (`MediaMixer.startRunning()`).
+    private let compositedFrames = FirstFrameLatch(videoTrackId: .max)
+    private let cameraInput = FirstFrameLatch(videoTrackId: 0)
 
     /// Gates `report(_:)` below so a self-initiated close (same RTMP codes as the server hanging
     /// up) is not reported to the user as a failure.
@@ -91,27 +106,6 @@ actor HaishinKitStreamingSession: StreamingSession {
         )
 
         do {
-            try Self.activateAudioSession()
-        } catch {
-            await tearDownCapture(pipeline)
-            throw .audioSessionUnavailable
-        }
-
-        do {
-            try await pipeline.mixer.attachVideo(camera)
-        } catch {
-            await tearDownCapture(pipeline)
-            throw .cameraUnavailable
-        }
-
-        do {
-            try await pipeline.mixer.attachAudio(microphone)
-        } catch {
-            await tearDownCapture(pipeline)
-            throw .microphoneUnavailable
-        }
-
-        do {
             try await pipeline.mixer.setFrameRate(configuration.frameRate)
             try await Self.applyCodecSettings(configuration, to: pipeline.stream)
         } catch {
@@ -128,8 +122,11 @@ actor HaishinKitStreamingSession: StreamingSession {
         // VideoToolbox (32ARGB offscreen pool vs 420v camera output) and breaks PTS continuity.
         // Must precede startRunning() — the mixer only applies a stored mode as it starts — and
         // the screen size below must too, or the first frames go out at the library's default
-        // 1280x720 and force the same rebuild. `setFrameRate` above must stay in front of the
-        // mode in turn: it only reaches the camera device while the mixer is still in passthrough.
+        // 1280x720 and force the same rebuild. `setFrameRate` above stays in front of the mode as
+        // well — the mixer reads its stored rate into the display link as it starts. The display link
+        // is all it reaches now: the camera is attached after the compositor is up, so it runs at
+        // HaishinKit's own default, which is the 30 fps `BroadcastConfiguration.default` asks for. A
+        // configuration with any other rate would need `setFrameRate` repeated after the attach.
         var videoSettings = await pipeline.mixer.videoMixerSettings
         videoSettings.mode = .offscreen
         await pipeline.mixer.setVideoMixerSettings(videoSettings)
@@ -137,11 +134,14 @@ actor HaishinKitStreamingSession: StreamingSession {
         let videoSize = configuration.videoSize
         await Task { @ScreenActor in mixer.screen.size = videoSize }.value
 
-        await pipeline.mixer.addOutput(pipeline.stream)
-        for view in previewViews {
-            await pipeline.mixer.addOutput(view)
+        do {
+            try await Self.bringUpCapture(
+                SessionCaptureBringUp(session: self, pipeline: pipeline, camera: camera, microphone: microphone)
+            )
+        } catch {
+            await tearDownCapture(pipeline)
+            throw error
         }
-        await pipeline.mixer.startRunning()
 
         self.pipeline = pipeline
         if let overlay {
@@ -162,6 +162,185 @@ actor HaishinKitStreamingSession: StreamingSession {
         await tearDownCapture(pipeline)
     }
 
+    /// Gives the devices back and nothing else: the connection, the stream and the status observers
+    /// stay up, so the server never learns the app went away and the broadcast keeps the one RTMP
+    /// session it started with.
+    func suspendCapture() async {
+        guard let pipeline else { return }
+        await releaseDevices(of: pipeline)
+    }
+
+    /// The inverse of `suspendCapture()` — everything the pipeline kept (codec settings, the
+    /// offscreen mixer mode, the screen size, the mute) is deliberately not re-applied here.
+    func resumeCapture() async throws(BroadcastFailure) {
+        // Read before the first await, for the same reason `startCapture` reads it.
+        let generation = captureGeneration
+        guard let pipeline else {
+            throw .unexpected(detail: "resumeCapture called before startCapture")
+        }
+        guard let camera = Self.captureDevice(facing: configuration.cameraFacing) else {
+            await tearDownCapture(pipeline)
+            throw .cameraMissing(configuration.cameraFacing)
+        }
+        guard let microphone = AVCaptureDevice.default(for: .audio) else {
+            await tearDownCapture(pipeline)
+            throw .microphoneUnavailable
+        }
+        do {
+            try await Self.bringUpCapture(
+                SessionCaptureBringUp(session: self, pipeline: pipeline, camera: camera, microphone: microphone)
+            )
+        } catch {
+            // The screen offers Try again after this, and that goes through `startCapture`, which
+            // builds a pipeline only when there is none — so a kept one would make the retry a
+            // silent no-op over a camera that never came back.
+            await tearDownCapture(pipeline)
+            throw error
+        }
+
+        // A stop can land during any await above and would otherwise leave this mixer running
+        // behind a session that already let go of it.
+        if generation != captureGeneration {
+            await tearDownCapture(pipeline)
+        }
+    }
+
+    /// What the server is holding, read from the library rather than from what the app last did: a
+    /// connection that died while the app was away took the publish with it.
+    func isStillPublishing() async -> Bool {
+        guard let pipeline else { return false }
+        let isConnected = await pipeline.connection.connected
+        let readyState = await pipeline.stream.readyState
+        return Self.isHeldByServer(isConnected: isConnected, readyState: readyState)
+    }
+
+    /// `connected` on its own is not an answer: after a background stay the library reported it true
+    /// over a socket the system had already reclaimed, with the stream's `readyState` still `.idle`.
+    /// Only a stream that reached `.publishing` is a broadcast the server is holding; trusting the
+    /// connection alone puts Online over a stream nothing goes out of.
+    static func isHeldByServer(isConnected: Bool, readyState: StreamReadyState) -> Bool {
+        isConnected && readyState == .publishing
+    }
+
+    /// The audio session must be up before the mixer takes the devices, and the camera before the
+    /// microphone — `startCapture` relies on both, and so does the return from the background.
+    private func attachDevices(
+        camera: sending AVCaptureDevice,
+        microphone: sending AVCaptureDevice,
+        to pipeline: Pipeline
+    ) async throws(BroadcastFailure) {
+        do {
+            try Self.activateAudioSession()
+        } catch {
+            throw .audioSessionUnavailable
+        }
+        do {
+            try await pipeline.mixer.attachVideo(camera)
+        } catch {
+            throw .cameraUnavailable
+        }
+        do {
+            try await pipeline.mixer.attachAudio(microphone)
+        } catch {
+            throw .microphoneUnavailable
+        }
+    }
+
+    /// The compositor measures every camera buffer against the display link's last `targetTimestamp`,
+    /// and only a tick refreshes that field — `Screen.reset()` clears neither `targetTimestamp` nor
+    /// the presentation-timestamp high-water mark. A buffer that arrives before the link has ticked is
+    /// therefore measured against a timestamp from before the app was suspended, so the compositor
+    /// stamps its next frame a whole background duration into the future, latches that stamp as its
+    /// high-water mark, and the high-water check in the display-link tick then silently drops every
+    /// frame until the wall clock catches up — the frozen preview. Starting the compositor and letting
+    /// it draw one frame refreshes both fields at the present before the camera can be measured
+    /// against them.
+    static func bringUpCapture(_ steps: sending some CaptureBringUp) async throws(BroadcastFailure) {
+        await steps.startCompositor()
+        await steps.awaitFirstCompositedFrame()
+        try await steps.attachDevices()
+        await steps.awaitFirstVideoInput()
+        await steps.attachStreamOutput()
+    }
+
+    /// Binds the bring-up steps to one pipeline and the devices this bring-up is for; every step
+    /// hops back onto the session.
+    private struct SessionCaptureBringUp: CaptureBringUp {
+        let session: HaishinKitStreamingSession
+        let pipeline: Pipeline
+        /// `AVCaptureDevice` is not `Sendable`; both devices are handed to the mixer on the session's
+        /// own executor and touched nowhere else — the claim `attachDevices` already makes with
+        /// `sending`. Without this the compiler reads them as task-isolated parts of a `sending`
+        /// value and refuses to pass them on.
+        nonisolated(unsafe) let camera: AVCaptureDevice
+        nonisolated(unsafe) let microphone: AVCaptureDevice
+
+        func startCompositor() async {
+            await session.startCompositor(of: pipeline)
+        }
+
+        func awaitFirstCompositedFrame() async {
+            await session.awaitFirstCompositedFrame()
+        }
+
+        func attachDevices() async throws(BroadcastFailure) {
+            try await session.attachDevices(camera: camera, microphone: microphone, to: pipeline)
+        }
+
+        func awaitFirstVideoInput() async {
+            await session.waitForFirstVideoInput()
+        }
+
+        func attachStreamOutput() async {
+            await session.attachStreamOutput(of: pipeline)
+        }
+    }
+
+    private func startCompositor(of pipeline: Pipeline) async {
+        for view in previewViews.views {
+            await pipeline.mixer.addOutput(view)
+        }
+        compositedFrames.arm()
+        cameraInput.arm()
+        await pipeline.mixer.addOutput(compositedFrames)
+        await pipeline.mixer.addOutput(cameraInput)
+        await pipeline.mixer.startRunning()
+    }
+
+    /// Bounded, because a compositor that never draws must still leave the caller with a stream it
+    /// can publish.
+    private func awaitFirstCompositedFrame() async {
+        let limit: Duration = .milliseconds(200)
+        let deadline = ContinuousClock.now + limit
+        while !compositedFrames.hasSeenFrame, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        guard !compositedFrames.hasSeenFrame else { return }
+        Self.log.notice(
+            "the compositor drew no frame within \(limit.description, privacy: .public); attaching the camera anyway"
+        )
+    }
+
+    private func attachStreamOutput(of pipeline: Pipeline) async {
+        await pipeline.mixer.addOutput(pipeline.stream)
+    }
+
+    /// The offscreen compositor draws at the frame rate from the moment the mixer starts, so a stream
+    /// attached before the camera's first buffer encodes and sends background colour for as long as
+    /// the camera takes to wake — a fifth of a second of black at the top of every broadcast and every
+    /// return from the background. Bounded, because a camera that never delivers must still leave the
+    /// caller with a stream it can publish.
+    ///
+    /// Waits on the latch armed in `startCompositor(of:)` rather than on `mixer.videoInputFormats`:
+    /// the formats are a level that survives a suspension, so from the second bring-up onwards they
+    /// answer before the camera has delivered anything.
+    private func waitForFirstVideoInput() async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !cameraInput.hasSeenFrame, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     private func tearDownCapture(_ pipeline: Pipeline?) async {
         isPublishing = false
         isPublishHandshakeInFlight = false
@@ -173,18 +352,22 @@ actor HaishinKitStreamingSession: StreamingSession {
         self.pipeline = nil
 
         guard let pipeline else { return }
+        await releaseDevices(of: pipeline)
+        // SwiftUI rebuilds preview views on the next capture; keeping stale ones here would leak
+        // one per stop.
+        previewViews.removeAll()
+    }
+
+    private func releaseDevices(of pipeline: Pipeline) async {
         await pipeline.mixer.stopRunning()
         // Always detach, even if the mixer never started: it holds the camera/mic until told
         // otherwise, dropping the mixer alone does not release them.
         try? await pipeline.mixer.attachVideo(nil)
         try? await pipeline.mixer.attachAudio(nil)
         await pipeline.mixer.removeOutput(pipeline.stream)
-        for view in previewViews {
+        for view in previewViews.views {
             await pipeline.mixer.removeOutput(view)
         }
-        // SwiftUI rebuilds preview views on the next capture; keeping stale ones here would leak
-        // one per stop.
-        previewViews.removeAll()
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
@@ -341,6 +524,10 @@ actor HaishinKitStreamingSession: StreamingSession {
         // H.264 is required by the task. Setting an H.264 profile is also what keeps the encoder
         // out of HEVC — the library picks its format from this string.
         video.profileLevel = kVTProfileLevel_H264_High_AutoLevel as String
+        // High profile would otherwise turn B-frames on, and a picture the encoder has to hold back
+        // to reorder is a picture the viewer waits for. Set here, with the rest: the library rebuilds
+        // the compression session when this changes, so it must be in force before the first frame.
+        video.allowFrameReordering = false
         video.maxKeyFrameIntervalDuration = Int32(configuration.keyFrameIntervalSeconds)
         video.expectedFrameRate = configuration.frameRate
         try await stream.setVideoSettings(video)
@@ -556,4 +743,72 @@ extension HaishinKitStreamingSession: MTHKViewRepresentable.PreviewSource {
     nonisolated func connect(to view: MTHKView) {
         Task { await attach(previewView: view) }
     }
+}
+
+/// The views the mixer draws the preview into, each held weakly. SwiftUI builds a new `MTHKView`
+/// every time the screen leaves the preview — the restore placeholder does that on every background
+/// round trip — and hands it here, so a list that held them strongly kept every Metal view ever built
+/// alive and fed: three of them after two round trips.
+/// Generic over the element so the rule can be pinned without a Metal device.
+struct WeakPreviewViews<View: AnyObject> {
+
+    private struct Box {
+        weak var view: View?
+    }
+
+    private var boxes: [Box] = []
+
+    /// The views something else is still showing; the ones SwiftUI released are dropped here.
+    var views: [View] {
+        boxes.compactMap(\.view)
+    }
+
+    func contains(_ view: View) -> Bool {
+        boxes.contains { $0.view === view }
+    }
+
+    mutating func append(_ view: View) {
+        boxes.removeAll { $0.view == nil }
+        boxes.append(Box(view: view))
+    }
+
+    mutating func removeAll() {
+        boxes.removeAll()
+    }
+}
+
+/// The first frame to reach it after `arm()`, latched. The bring-up needs an edge — "a frame has
+/// arrived since I asked" — and the mixer offers only levels: `videoInputFormats` stays set across a
+/// suspend, so it answers yes before the camera has delivered anything.
+/// `@unchecked Sendable` because the one mutable field is read and written under `lock`.
+final class FirstFrameLatch: MediaMixerOutput, @unchecked Sendable {
+    let videoTrackId: UInt8?
+    let audioTrackId: UInt8? = nil
+
+    private let lock = NSLock()
+    private var hasFrame = false
+
+    init(videoTrackId: UInt8) {
+        self.videoTrackId = videoTrackId
+    }
+
+    var hasSeenFrame: Bool {
+        lock.withLock { hasFrame }
+    }
+
+    func arm() {
+        lock.withLock { hasFrame = false }
+    }
+
+    func latchFrame() {
+        lock.withLock { hasFrame = true }
+    }
+
+    func mixer(_ mixer: MediaMixer, didOutput sampleBuffer: CMSampleBuffer) {
+        latchFrame()
+    }
+
+    func mixer(_ mixer: MediaMixer, didOutput buffer: AVAudioPCMBuffer, when: AVAudioTime) {}
+
+    func selectTrack(_ id: UInt8?, mediaType: CMFormatDescription.MediaType) async {}
 }

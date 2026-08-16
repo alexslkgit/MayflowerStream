@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import HaishinKit
 import Testing
 
 @testable import MayflowerStream
@@ -71,6 +72,72 @@ struct CaptureGenerationTests {
 
         // A flag would answer the first stop and be indistinguishable from the second; a start between the two has to tell them apart.
         #expect(await session.captureGeneration == before + 2)
+    }
+}
+
+/// The question the return from the background is decided on. The device trace caught the connection answering `connected = true` over a socket the system had already reclaimed, with the stream's ready state still `.idle` — the panel would have said Online over a broadcast nobody was receiving.
+@Suite("What counts as a broadcast the server is still holding")
+struct HeldSessionTests {
+
+    @Test("A connection that still calls itself open is not a broadcast")
+    func aStaleConnectionIsNotABroadcast() {
+        #expect(
+            HaishinKitStreamingSession.isHeldByServer(isConnected: true, readyState: .idle) == false,
+            "the exact state measured on the device was read as a live broadcast"
+        )
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: true, readyState: .publish) == false)
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: true, readyState: .play) == false)
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: true, readyState: .playing) == false)
+    }
+
+    @Test("A stream that reached publishing over an open connection is a broadcast the server is holding")
+    func aPublishingStreamIs() {
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: true, readyState: .publishing))
+    }
+
+    @Test("A closed connection is nothing, whatever the stream last remembered")
+    func aClosedConnectionIsNothing() {
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: false, readyState: .publishing) == false)
+        #expect(HaishinKitStreamingSession.isHeldByServer(isConnected: false, readyState: .idle) == false)
+    }
+}
+
+/// SwiftUI hands the session a freshly built `MTHKView` every time the screen goes back to showing the preview, and the restore placeholder means every background round trip does exactly that. The device trace counted the result: one view after the start, two after the first return, three after the second — all of them still on the list, all of them fed.
+@Suite("What the session keeps hold of for the preview")
+struct PreviewViewsTests {
+
+    /// Stands in for `MTHKView`; what the session does with the list does not depend on Metal.
+    private final class StubView {}
+
+    @Test("A preview view SwiftUI has released leaves the list instead of piling up behind the next one")
+    func aReleasedViewLeavesTheList() {
+        var views = WeakPreviewViews<StubView>()
+        var first: StubView? = StubView()
+        views.append(first!)
+        #expect(views.views.count == 1)
+
+        first = nil
+
+        #expect(views.views.count == 0, "the session is still holding a preview view nobody is showing")
+    }
+
+    /// The container is half of the leak fix; the other half is `releaseDevices`, which removes the views from the mixer's outputs before they are released, so nothing the mixer holds keeps one alive.
+    @Test("A view nobody else holds leaves the list; the one still held stays")
+    func aViewNobodyHoldsLeavesTheList() {
+        var views = WeakPreviewViews<StubView>()
+        var onScreen: StubView? = StubView()
+        views.append(onScreen!)
+
+        for _ in 1...2 {
+            // The restore placeholder replaces the preview, so SwiftUI releases the view it built and builds another one on the way back.
+            onScreen = nil
+            let rebuilt = StubView()
+            views.append(rebuilt)
+            onScreen = rebuilt
+        }
+
+        #expect(views.views.count == 1, "\(views.views.count) preview views after two round trips, and the mixer feeds every one of them")
+        #expect(views.contains(onScreen!), "the view actually on screen is not the one the mixer would feed")
     }
 }
 

@@ -46,7 +46,8 @@ struct BroadcastControllerTests {
         connectivity: FakeConnectivityMonitor = FakeConnectivityMonitor(),
         countdownTick: Duration = instantCountdownTick,
         // Like the delays above: a test that is not about the settle after a restore does not sit through it.
-        pathSettleDelay: Duration = .zero
+        pathSettleDelay: Duration = .zero,
+        heldSessionRecheck: Duration = .milliseconds(50)
     ) -> BroadcastController {
         BroadcastController(
             endpoint: Self.endpoint,
@@ -56,7 +57,8 @@ struct BroadcastControllerTests {
             reconnectPolicy: reconnect,
             connectivity: connectivity,
             countdownTick: countdownTick,
-            pathSettleDelay: pathSettleDelay
+            pathSettleDelay: pathSettleDelay,
+            heldSessionRecheck: heldSessionRecheck
         )
     }
 
@@ -1068,6 +1070,562 @@ struct BroadcastControllerTests {
         #expect(session.captureStopCount == 1)
         #expect(controller.isCapturing == false)
         #expect(controller.state == .offline)
+    }
+
+    // MARK: - Leaving the app and coming back
+
+    @Test("A camera that was running when the app went away comes back on its own")
+    func returningRestoresACameraThatWasRunning() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.suspendForBackground()
+        #expect(controller.isCapturing == false)
+
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing)
+        #expect(session.captureResumeCount == 1)
+        #expect(session.captureStartCount == 1, "the pipeline was rebuilt instead of picked back up")
+    }
+
+    @Test("A camera that was off is not started by a return to the foreground")
+    func returningStartsNothingThatWasNotRunning() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing == false)
+        #expect(session.captureStartCount == 0)
+    }
+
+    @Test("A broadcast cut short by the app going away picks itself back up")
+    func returningResumesABroadcastThatWasOnAir() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        await controller.suspendForBackground()
+        #expect(controller.state == .offline)
+
+        await controller.restoreAfterForeground()
+
+        try await waitUntil("online again") { controller.state == .online }
+        #expect(controller.isCapturing)
+        #expect(session.captureStartCount == 1, "a second pipeline is a second connection to the same key")
+        #expect(session.isPipelineAlive)
+        #expect(session.publishStartCount == 2)
+    }
+
+    /// The ladder backs off before every attempt, including the first — which on a return from the background is a wait for a failure that never happened. The path never dropped, so the skip that a returning network buys cannot fire here either.
+    @Test("A resume publishes at once instead of sitting out a backoff nothing earned")
+    func aResumeDoesNotWaitOutTheFirstBackoff() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session, reconnect: Self.patientReconnect)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        // Five seconds of backoff stand in front of the first attempt, so a publish inside the test window can only mean it was never waited out.
+        try await waitUntil("republished at once") { session.publishStartCount == 2 }
+        try await waitUntil("online again") { controller.state == .online }
+        #expect(controller.secondsUntilNextAttempt == nil)
+    }
+
+    @Test("A drop mid-broadcast still backs off before its first attempt")
+    func anOrdinaryReconnectionStillWaitsBeforeTheFirstAttempt() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session, reconnect: Self.patientReconnect)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.emit(.disconnected(.connectionLost))
+
+        // The countdown is only on screen while a backoff is actually being waited out.
+        try await waitUntil("counting down to the first attempt") { controller.secondsUntilNextAttempt != nil }
+        #expect(controller.state == .reconnecting(attempt: 1))
+        #expect(session.publishStartCount == 1, "a server that just hung up is given a second before it is asked again")
+    }
+
+    /// The resume goes through the reconnection ladder, so a server that will not take the stream back ends on the card that offers Try again — never on "Edit stream key", which is what a cold start would have made of the same refusal.
+    @Test("A resume the server keeps refusing gives up like a reconnection, not like a bad key")
+    func aRefusedResumeEndsAsAReconnectionThatGaveUp() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.publishFailures = Array(repeating: .streamKeyRejected, count: 3)
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        try await waitUntil("given up") { controller.state.failure != nil }
+        #expect(controller.state == .failed(.reconnectionGaveUp(attempts: 3)))
+        #expect(controller.isCapturing, "the camera stays up so Try again has something to publish")
+    }
+
+    @Test("A camera that will not come back does not go on to resume the broadcast")
+    func aFailedCameraOnTheWayBackResumesNothing() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        await controller.suspendForBackground()
+        session.captureFailure = .cameraUnavailable
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing == false)
+        #expect(controller.state == .failed(.cameraUnavailable))
+        #expect(session.publishStartCount == 1)
+    }
+
+    /// Giving the devices back runs while iOS is freezing the app, so it routinely finishes only after the return — the restore must wait for it instead of reading flags that are not armed yet. This is the black-screen-after-return bug from his device pass.
+    @Test("A return that lands before the teardown has finished still restores everything")
+    func aFastReturnStillRestores() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.suspendCaptureDelay = .milliseconds(200)
+        let suspend = Task { await controller.suspendForBackground() }
+        try? await Task.sleep(for: .milliseconds(10))
+        await controller.restoreAfterForeground()
+        await suspend.value
+
+        try await waitUntil("online again") { controller.state == .online }
+        #expect(controller.isCapturing)
+        #expect(session.publishStartCount == 2)
+    }
+
+    @Test("The duration keeps counting across a background round trip instead of restarting")
+    func theDurationSurvivesTheRoundTrip() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        // Real time, deliberately: the duration is measured against the wall clock.
+        try? await Task.sleep(for: .milliseconds(1100))
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+        try await waitUntil("online again") { controller.state == .online }
+
+        #expect(controller.elapsedSeconds >= 1, "the resumed broadcast is the same broadcast, not a new one")
+    }
+
+    /// The panel shows the duration all through `.reconnecting`, and `goOnline()` is the first thing that would recompute it — so without a recount at the restore the resumed broadcast is watched from 00:00 until the ladder succeeds, then jumps.
+    @Test("The resumed duration is already right while the ladder is still climbing")
+    func theResumedDurationIsRightBeforeItGoesOnlineAgain() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session, reconnect: Self.patientReconnect)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        try? await Task.sleep(for: .milliseconds(1100))
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.state.isLive == false, "measured before goOnline() could have done it for us")
+        #expect(controller.elapsedSeconds >= 1)
+    }
+
+    /// One RTMP session per broadcast. Twitch takes one live publisher per stream key, so a second connection with the same key displaces the first — and a session displaced by its own replacement is not a drop the server holds open, it is a new stream with the uptime back at zero.
+    @Test("Backgrounding mid-broadcast keeps the session and gives back only the devices")
+    func backgroundingKeepsTheSession() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        await controller.suspendForBackground()
+
+        #expect(session.captureSuspendCount == 1)
+        #expect(session.publishStopCount == 0, "a goodbye here would end the stream on the server for good")
+        #expect(session.captureStopCount == 0, "taking the pipeline down is what forces a second connection")
+        #expect(session.isPipelineAlive)
+    }
+
+    @Test("A return the server is still holding goes back Online without publishing again")
+    func aHeldSessionGoesStraightBackOnline() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.keepsPublishingWhileSuspended = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+        // Long enough for a ladder that should not be running to have published, so the count below is a fact and not a head start.
+        try? await Task.sleep(for: .milliseconds(50))
+
+        #expect(controller.state == .online, "nothing on the wire ended, so there is nothing to reconnect")
+        #expect(session.publishStartCount == 1, "publishing again is exactly what starts a second stream")
+        #expect(session.isPipelineAlive)
+    }
+
+    @Test("The duration keeps counting across a round trip the server held onto")
+    func theDurationSurvivesAHeldRoundTrip() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        // Real time, deliberately: the duration is measured against the wall clock.
+        try? await Task.sleep(for: .milliseconds(1100))
+        session.keepsPublishingWhileSuspended = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.state == .online)
+        #expect(controller.elapsedSeconds >= 1, "the broadcast the server never lost was restarted at zero")
+    }
+
+    /// A server that hung up while the process was frozen sends a FIN the socket only reads once the app is running again, so the question asked at the moment of the return is answered from a connection that has not heard the news yet. Without a second look the panel says Online over a dead socket until the library gets round to saying otherwise.
+    @Test("A held session that turns out to be dead is noticed and reconnected")
+    func aStaleHeldSessionIsCaughtAndReconnected() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.keepsPublishingWhileSuspended = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+        #expect(controller.state == .online, "the session answered that it was still held")
+
+        session.keepsPublishingWhileSuspended = false
+
+        try await waitUntil("the dead session is published again") { session.publishStartCount > 1 }
+        try await waitUntil("back online") { controller.state == .online }
+    }
+
+    /// Measured on the device, in both round trips of the diagnostic run: the socket the system reclaimed while the process was frozen is still reported as open, RTMP refuses to dial a connection it believes is open, and that refusal comes back in the same millisecond. The rung it costs is a rung and the whole backoff behind it — 2 s of the user's picture, spent on the app's own leftover.
+    @Test("The first rung of the ladder is not spent on the connection the background stay left behind")
+    func theLadderDoesNotSpendARungOnTheLeftoverConnection() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session, reconnect: Self.patientAfterTheFirstAttempt)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.leavesTheConnectionOpenAfterTheDrop = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        // Every rung after the first waits five seconds here, so a wasted first rung is a test that never comes back online.
+        try await waitUntil("online again on the first attempt") { controller.state == .online }
+        #expect(
+            session.publishStopCount == 1,
+            "the ladder dialled without closing the connection the app already knew the server had let go of"
+        )
+        #expect(
+            session.publishStartCount == 2,
+            "the broadcast was published \(session.publishStartCount) times, one of them into a connection that could only refuse it"
+        )
+    }
+
+    @Test("A session the server really is holding is left alone")
+    func aHealthyHeldSessionIsNotDisturbedByTheRecheck() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.keepsPublishingWhileSuspended = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+        // Well past the re-check window, so the counts below are a fact rather than a head start.
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(controller.state == .online)
+        #expect(session.publishStartCount == 1, "publishing again is exactly what starts a second stream")
+    }
+
+    @Test("Leaving the screen takes the re-check with it")
+    func theRecheckDoesNothingAfterAShutdown() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.keepsPublishingWhileSuspended = true
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+        await controller.shutDown()
+        session.keepsPublishingWhileSuspended = false
+        try? await Task.sleep(for: .milliseconds(200))
+
+        #expect(controller.state == .offline)
+        #expect(session.publishStartCount == 1, "a broadcast the user ended is not one to reconnect")
+    }
+
+    @Test("The Stop button and leaving the screen still say goodbye politely")
+    func deliberateExitsStillSayGoodbye() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        await controller.stopBroadcast()
+        await controller.shutDown()
+
+        #expect(session.publishStopCount >= 1)
+        #expect(session.captureSuspendCount == 0, "a deliberate exit does not intend to come back")
+        #expect(session.isPipelineAlive == false)
+    }
+
+    @Test("The clock overlay survives the background round trip")
+    func theClockOverlaySurvivesTheRoundTrip() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.toggleClockOverlay()
+        #expect(session.overlay != nil)
+
+        await controller.suspendForBackground()
+        #expect(session.overlay == nil, "nothing may keep drawing while the app is away")
+
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isClockOverlayVisible)
+        #expect(session.overlay != nil)
+    }
+
+    @Test("A clock that was off stays off after the round trip")
+    func aClockThatWasOffStaysOff() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isClockOverlayVisible == false)
+        #expect(session.overlay == nil)
+    }
+
+    @Test("A muted microphone stays muted across the background round trip")
+    func mutedMicrophoneSurvivesTheRoundTrip() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.toggleMicrophone()
+        #expect(controller.isMicrophoneMuted)
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isMicrophoneMuted, "the mute did not survive the round trip")
+        #expect(session.isMicrophoneMuted, "the mute did not survive the round trip")
+    }
+
+    @Test("An unmuted microphone stays unmuted across the background round trip")
+    func unmutedMicrophoneStaysUnmuted() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isMicrophoneMuted == false)
+        #expect(session.isMicrophoneMuted == false)
+    }
+
+    @Test("A muted microphone stays muted even when only the camera was on")
+    func mutedMicrophoneSurvivesWithNothingOnAir() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.toggleMicrophone()
+        #expect(controller.isMicrophoneMuted)
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing)
+        #expect(controller.state == .offline)
+        #expect(controller.isMicrophoneMuted, "the mute did not survive the round trip")
+        #expect(session.isMicrophoneMuted, "the mute did not survive the round trip")
+    }
+
+    @Test("A camera that was on with nothing on air comes back alone")
+    func returningWithNothingOnAirPublishesNothing() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.suspendForBackground()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing)
+        #expect(controller.state == .offline)
+        #expect(session.publishStartCount == 0)
+    }
+
+    @Test("Leaving the screen owes no restore")
+    func shuttingDownAloneOwesNoRestore() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.shutDown()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing == false)
+        #expect(session.captureStartCount == 1)
+    }
+
+    /// A permission alert or Control Centre makes the app inactive without ever backgrounding it, so the camera was never torn down and there is nothing to restore.
+    @Test("Coming back from an interruption that tore nothing down leaves the running camera alone")
+    func returningWithoutHavingBeenBackgroundedTouchesNothing() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing)
+        #expect(session.captureStartCount == 1)
+    }
+
+    @Test("The restore is owed once, so a second return without a second backgrounding starts nothing")
+    func theRestoreIsOwedOnce() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.suspendForBackground()
+
+        await controller.restoreAfterForeground()
+        await controller.shutDown()
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isCapturing == false)
+        #expect(session.captureStartCount == 1)
+        #expect(session.captureResumeCount == 1)
+    }
+
+    // MARK: - Telling the screen a restore is under way
+
+    @Test("Backgrounding a running camera puts the screen into its restoring state")
+    func suspendingMarksTheScreenAsRestoring() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+
+        await controller.suspendForBackground()
+
+        #expect(controller.isRestoring)
+        #expect(controller.isCapturing == false, "which is exactly the moment the camera-off screen would flash")
+    }
+
+    /// The flag is what the screen reads the instant it comes back, and the return routinely lands inside the frozen goodbye — so it cannot be armed by the teardown that has not finished.
+    @Test("The restoring state is up before the teardown behind it has finished")
+    func restoringIsUpBeforeTheTeardownFinishes() async throws {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.startBroadcast()
+        session.emit(.publishing)
+        try await waitUntil("online") { controller.state == .online }
+
+        session.suspendCaptureDelay = .milliseconds(200)
+        let suspend = Task { await controller.suspendForBackground() }
+        try? await Task.sleep(for: .milliseconds(10))
+        #expect(controller.isRestoring, "a return landing here must not find the flag still false")
+
+        await suspend.value
+        #expect(controller.isRestoring, "and it stays up until the return has put the screen back")
+    }
+
+    @Test("The restoring state ends when the return has put the screen back")
+    func restoringEndsWithTheRestore() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.suspendForBackground()
+
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isRestoring == false)
+        #expect(controller.isCapturing)
+    }
+
+    @Test("A camera that will not come back still ends the restoring state, so the failure card is reachable")
+    func aFailedRestoreStillEndsTheRestoringState() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.suspendForBackground()
+        session.captureFailure = .cameraUnavailable
+
+        await controller.restoreAfterForeground()
+
+        #expect(controller.isRestoring == false)
+        #expect(controller.state == .failed(.cameraUnavailable))
+    }
+
+    @Test("Leaving the screen leaves nothing restoring behind")
+    func shuttingDownClearsTheRestoringState() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+        await controller.startCapture()
+        await controller.suspendForBackground()
+
+        await controller.shutDown()
+
+        #expect(controller.isRestoring == false)
+    }
+
+    @Test("A camera that was off is never shown a restore in progress")
+    func aCameraThatWasOffNeverRestores() async {
+        let session = FakeStreamingSession()
+        let controller = makeController(session: session)
+
+        await controller.suspendForBackground()
+        #expect(controller.isRestoring == false)
+
+        await controller.restoreAfterForeground()
+        #expect(controller.isRestoring == false)
     }
 
     // MARK: - What the screen shows
